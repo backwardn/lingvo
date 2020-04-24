@@ -24,8 +24,10 @@ import collections as py_collections
 import contextlib
 import functools
 import hashlib
+import inspect
 import math
 import numbers
+import os
 import pkgutil
 import re
 import threading
@@ -86,6 +88,9 @@ tf.flags.DEFINE_bool(
     'Do not add tf.identity() on vars. This allows TPUPartitionedCallOp to use'
     'variable handles directly for weight-sharing / multi-core '
     'inference on TPUs.')
+
+tf.flags.DEFINE_bool('disable_py_utils_debug', False,
+                     'If True disables all py_utils.Debug() logs.')
 
 # NOTE: Using absl flags in libraries are frowned upon for several reasons:
 #
@@ -285,6 +290,78 @@ def Log(value, prefix, **kwargs):
       last = tf.py_func(_Print, [prefix + ' : ' + k, kwargs[k]], [])
   with tf.control_dependencies([last]):
     return tf.identity(value)
+
+
+def Debug(tensor, message='', enabled=True, summarize=100, more=None):
+  """Wrapper around tf.Print() and tf.logging.info() to simplify debug printing.
+
+  x = py_utils.Debug(x)
+
+  When the graph is built a regular log info line will be printed:
+  -DBG- py_utils_test.py:429 x=Tensor(...
+
+  Then when the tensor node is evaluated it will print lines like:
+  -DBG- py_utils_test.py:429 x Const:0[x.shape=][2 2][x=][[1 2][3 4]]
+
+  WARNING: The code that parses local variable names can fail. E.g. don't write
+  two Debug() calls on one line or a Debug() call that spans more than one line.
+
+  Args:
+     tensor: A tensor to print.
+     message: A message to print.
+     enabled: To enable the debugging.
+     summarize: Integer with number of tensor values to print.
+     more: An optional list of additional tensors.
+
+  Returns:
+    The tensor.
+  """
+  if not enabled or _FromGlobal('disable_py_utils_debug'):
+    return tensor
+
+  if more is None:
+    more = []
+
+  stack = inspect.stack()[1][0]
+  caller = inspect.getframeinfo(stack)
+
+  caller_var = ''
+  caller_more_vars = []
+  if caller.code_context:
+    # Rough and likely to fail. But better than nothing.
+    caller_var = re.compile(r'Debug\((.*?)(\)|,).*$').search(
+        caller.code_context[0]).groups()[0]
+    if more:
+      more_vars = re.compile(r'more=\[(.*?)\].*$').search(
+          caller.code_context[0]).groups()[0]
+      caller_more_vars = more_vars.split(',')
+
+  the_class = ''
+  if 'self' in stack.f_locals:
+    the_class = stack.f_locals['self'].__class__.__name__
+  header = '-DBG- {}:{}:{}:{} {} '.format(
+      os.path.basename(caller.filename), the_class, caller.function,
+      caller.lineno, message)
+
+  info = '{}{}={}'.format(header, caller_var, tensor)
+  for name, val in zip(caller_more_vars, more):
+    info += ' {}={}'.format(name.strip(), val)
+  tf.logging.info(info)
+
+  if isinstance(tensor, tf.Tensor):
+    tensors = []
+    tensors += [tf.constant('{}.shape='.format(caller_var)), tf.shape(tensor)]
+    for name, val in zip(caller_more_vars, more):
+      tensors += [tf.constant('{}.shape='.format(name.strip())), tf.shape(val)]
+
+    tensors += [tf.constant('{}='.format(caller_var)), tensor]
+    for name, val in zip(caller_more_vars, more):
+      tensors += [tf.constant('{}='.format(name.strip())), val]
+
+    info = '{}{} {}'.format(header, caller_var, tensor.name)
+    return tf.Print(tensor, tensors, info, summarize=summarize)
+
+  return tensor
 
 
 def _Save(steps, prefix, key, val):
@@ -690,7 +767,8 @@ class NestedMap(dict):
   @staticmethod
   def CheckKey(key):
     """Asserts that key is valid NestedMap key."""
-    assert isinstance(key, six.string_types) and _NAME_PATTERN.match(key), key
+    if not (isinstance(key, six.string_types) and _NAME_PATTERN.match(key)):
+      raise ValueError('Invalid NestedMap key \'{}\''.format(key))
 
   def GetItem(self, key):
     """Gets the value for the nested `key`.
@@ -1880,7 +1958,8 @@ def _ComputeGradientsTpu(loss,
                          grad_aggregation_method,
                          colocate_gradients_with_ops,
                          gate_gradients,
-                         skip_zero_gradients=None):
+                         skip_zero_gradients=None,
+                         use_bf16_gradients_ar=False):
   """Computes gradients for local loss across whole TPU cluster.
 
   This implementation specializes for the case where weight params maybe used
@@ -1899,6 +1978,8 @@ def _ComputeGradientsTpu(loss,
       with the original op.
     gate_gradients: boolean, flag to be passed to tf.gradients.
     skip_zero_gradients: whether to skip zero gradients during aggregation.
+    use_bf16_gradients_ar: Whether to use bfloat16 dtype for gradients
+      all-reduce.
 
   Returns:
     Gradients to be passed back.
@@ -1932,6 +2013,8 @@ def _ComputeGradientsTpu(loss,
     if g is None:
       aggregated_grads.append(None)
       continue
+    if use_bf16_gradients_ar:
+      g = tf.cast(g, tf.bfloat16)
     with tf.colocate_with(g):
       if skip_zero_gradients is None:
         # loss is already scaled by 1/shards.
@@ -1988,7 +2071,8 @@ def ComputeGradients(
     colocate_gradients_with_ops=True,
     gate_gradients=False,
     compute_gradients_fn=None,
-    skip_zero_gradients=None):
+    skip_zero_gradients=None,
+    use_bf16_gradients_ar=False):
   """Computes gradients of variables in vmap w.r.t loss.
 
   Args:
@@ -2015,6 +2099,8 @@ def ComputeGradients(
           reduce_sum(abs(grads)) < 1e-8.
         * `weight`: skip if the individual weight's gradients are almost zero:
           abs(grad) < 1e-8.
+    use_bf16_gradients_ar: Whether to use bfloat16 dtype for gradients
+      all-reduce. This applies to TPU only.
 
   Returns:
     var_grad - a `.NestedMap` of VarGrad. You can view
@@ -2056,7 +2142,9 @@ def ComputeGradients(
     # tpu vs non-tpu is slightly different.
     if use_tpu():
       take_grad = functools.partial(
-          _ComputeGradientsTpu, skip_zero_gradients=skip_zero_gradients)
+          _ComputeGradientsTpu,
+          skip_zero_gradients=skip_zero_gradients,
+          use_bf16_gradients_ar=use_bf16_gradients_ar)
     else:
       take_grad = ComputeGradientsSimple
 
@@ -4093,3 +4181,52 @@ def ReadVariable(var_op):
 
   assert var_op.type in ['Variable', 'VariableV2']
   return var_op.outputs[0]
+
+
+_TPU_SUMMARY_TENSORS_KEY = ('__lingvo_tpu_summary_tensors')
+
+_get_tpu_summary_tensors = _CollectionGetter(_TPU_SUMMARY_TENSORS_KEY,
+                                             lambda: [])
+
+
+def AddTpuSummaryTensor(name, value, weight=1.0):
+  """Adds tensor to global collection of summaries.
+
+  This needs to be used in situations where tf.summary() could be used but
+  currently tf.summary is not supported. Use py_utils.AddTpuSummaryTensor() in
+  low level code to add summary tensors to global collection of summaries.
+  Then recover all summary tensors from global collection by calling
+  py_utils.GetTpuSummaryTensors() from top level code (for example from
+  ComputeLoss method of BaseTask).
+
+  In addition to 'name' argument, current tensorflow name scope is also
+  captured and added to the metric name. This way for example summaries from
+  a repeated layer will appear as separate graphs in the tensorboard.
+
+  Weight argument is optional and defaults to 1.0. See BaseTask.ComputeLoss for
+  the exact definition of weight for eval metrics.
+
+  Args:
+    name: metric name
+    value: metric value tensor
+    weight: weight tensor for weighted metrics
+  """
+  tpu_summary_tensors = _get_tpu_summary_tensors()
+  x = NestedMap()
+  x.name = name
+  x.value = value, tf.convert_to_tensor(weight)
+  x.name_scope = tf.get_default_graph().get_name_scope()
+  tpu_summary_tensors.append(x)
+
+
+def GetTpuSummaryTensors():
+  """Returns summary tensors from global collection.
+
+  Returns:
+    A dict containing str keys and (metric, weight) pairs as values
+  """
+  tpu_summary_tensors = _get_tpu_summary_tensors()
+  return {
+      '%s/%s' % (x.name, SanitizeScopeKey(x.name_scope)): x.value
+      for x in tpu_summary_tensors
+  }

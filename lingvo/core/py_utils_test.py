@@ -1,4 +1,4 @@
-# Lint as: python2, python3
+# Lint as: python3
 # Copyright 2018 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,9 +15,6 @@
 # ==============================================================================
 """Tests for py_utils."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import collections
 import copy
@@ -419,6 +416,17 @@ class PyUtilsTest(test_utils.TestCase):
       x = tf.constant([[1, 2], [3, 4]])
       y = tf.constant([10] * 4)
       x = py_utils.Log(x, 'testLog', x=x, y=y)
+      self.assertAllEqual(x.eval(), [[1, 2], [3, 4]])
+
+  def testDebug(self):
+    with self.session():
+      x = tf.constant([[1, 2], [3, 4]])
+      y = tf.constant([11] * 4)
+      z = tf.constant([22] * 4)
+      x = py_utils.Debug(x, 'msg')
+      self.assertAllEqual(x.eval(), [[1, 2], [3, 4]])
+
+      x = py_utils.Debug(x, 'msg', more=[y, z])
       self.assertAllEqual(x.eval(), [[1, 2], [3, 4]])
 
   def testSave(self):
@@ -2888,6 +2896,31 @@ class TopKTest(test_utils.TestCase):
       v3, v4 = sess.run([top1_index_a, top1_index_b])
       self.assertAllEqual(v1, v2)
       self.assertAllEqual(v3, v4)
+
+
+class TpuSummaryTensorsTest(test_utils.TestCase):
+
+  def testTpuSummaryTensors(self):
+    with self.session() as sess:
+      with tf.name_scope('fprop'):
+        with tf.name_scope('tower_0_0'):
+          with tf.name_scope('fprop'):
+            with tf.name_scope('my_model'):
+              with tf.name_scope('layer_001'):
+                with tf.name_scope('fprop'):
+                  x = tf.constant(0., name='inputs')
+                  py_utils.AddTpuSummaryTensor('mean_x', tf.reduce_mean(x))
+              with tf.name_scope('layer_002'):
+                with tf.name_scope('fprop'):
+                  x = tf.identity(x, name='inputs')
+                  py_utils.AddTpuSummaryTensor('mean_x', tf.reduce_mean(x))
+      tpu_summary_tensors = py_utils.GetTpuSummaryTensors()
+      actual_value = sess.run([tpu_summary_tensors])
+      expected_value = [{
+          'mean_x/fprop/tower_0_0/fprop/my_model/layer_001/fprop': (0., 1.),
+          'mean_x/fprop/tower_0_0/fprop/my_model/layer_002/fprop': (0., 1.),
+      }]
+      self.assertAllEqual(expected_value, actual_value)
 
 
 if __name__ == '__main__':
