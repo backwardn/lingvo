@@ -71,7 +71,7 @@ class AsrModelTest(test_utils.TestCase):
       p = self._testParams()
       mdl = p.Instantiate()
       mdl.FPropDefaultTheta()
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       test_utils.CompareToGoldenSingleFloat(self, 4.472597, mdl.loss.eval())
 
       actual_var_names = [_.name for _ in tf.trainable_variables()]
@@ -120,14 +120,14 @@ class AsrModelTest(test_utils.TestCase):
       self.assertCountEqual(expected_var_names, actual_var_names)
 
   def testDecode(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       tf.random.set_seed(93820985)
       p = self._testParams()
       mdl = p.Instantiate()
       input_batch = mdl.input_generator.GetPreprocessedInputBatch()
       dec_out_dict = mdl.DecodeWithTheta(mdl.theta, input_batch)
-      tf.global_variables_initializer().run()
-      dec_out = sess.run(dec_out_dict)
+      self.evaluate(tf.global_variables_initializer())
+      dec_out = self.evaluate(dec_out_dict)
       print('dec_out', dec_out)
       metrics_dict = mdl.CreateDecoderMetrics()
       key_value_pairs = mdl.PostProcessDecodeOut(dec_out, metrics_dict)
@@ -255,7 +255,7 @@ class AsrModelTest(test_utils.TestCase):
       mdl = p.Instantiate()
       mdl.FPropDefaultTheta()
       mdl.BProp()
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       test_utils.CompareToGoldenSingleFloat(self, 4.472597, mdl.loss.eval())
       mdl.train_op.run()
 
@@ -269,7 +269,7 @@ class AsrModelTest(test_utils.TestCase):
       mdl = p.Instantiate()
       mdl.FPropDefaultTheta()
       mdl.BProp()
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       test_utils.CompareToGoldenSingleFloat(self, 4.472597, mdl.loss.eval())
       mdl.train_op.run()
 
@@ -336,7 +336,7 @@ class AsrModelTest(test_utils.TestCase):
       py_utils.ApplyGradMultiplier(var_grads, -1.1)
 
   def testLRDecay(self):
-    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+    with self.session(use_gpu=False, graph=tf.Graph()):
       p = self._testParams()
       tp = p.train
       tp.lr_schedule.boundaries = [300000, 400000, 500000]
@@ -344,14 +344,14 @@ class AsrModelTest(test_utils.TestCase):
       lrs = tp.lr_schedule.Instantiate()
       steps = [299999, 300001, 399999, 400001, 499999, 500001]
       fetches = [lrs.Value(_) for _ in steps]
-      values = sess.run(fetches)
+      values = self.evaluate(fetches)
       self.assertAllClose([1.0, 0.1, 0.1, 0.01, 0.01, 0.001], values)
 
   def testBatchSplit(self):
 
     def Run(num_splits):
       p = self._testParams()
-      with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      with self.session(use_gpu=False, graph=tf.Graph()):
         tf.random.set_seed(93820981)
         p.input.cur_iter_in_seed = False
         p.input.bucket_batch_limit = [
@@ -360,8 +360,8 @@ class AsrModelTest(test_utils.TestCase):
         with cluster_factory.ForTestingWorker(gpus=num_splits, do_eval=True):
           mdl = p.Instantiate()
           metrics = mdl.FPropDefaultTheta()[0]
-        tf.global_variables_initializer().run()
-        return sess.run(metrics['loss'])
+        self.evaluate(tf.global_variables_initializer())
+        return self.evaluate(metrics['loss'])
 
     res1, res2 = Run(1), Run(2)
     self.assertAllClose(res1[0], res2[0])
@@ -412,7 +412,7 @@ class AsrModelTest(test_utils.TestCase):
           test_helper.test_src_dir_path('tools/testdata/gan_or_vae.16k.wav'),
           'rb') as f:
         wav = f.read()
-      sess.run(tf.global_variables_initializer())
+      self.evaluate(tf.global_variables_initializer())
       fetches = sess.run(fetches, {feeds['wav']: wav})
 
       self.assertAllEqual((1, p.decoder.beam_search.num_hyps_per_beam),

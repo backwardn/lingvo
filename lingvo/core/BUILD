@@ -690,6 +690,7 @@ py_library(
     srcs = ["layers_test.py"],
     srcs_version = "PY2AND3",
     deps = [
+        ":cluster_factory",
         ":gpipe",
         ":layers",
         ":py_utils",
@@ -750,6 +751,30 @@ py_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+py_library(
+    name = "ml_perf_bleu_metric",
+    srcs = ["ml_perf_bleu_metric.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":metrics",
+        "//lingvo:compat",
+        # Implicit numpy dependency.
+        # Implicit six dependency.
+    ],
+)
+
+py_test(
+    name = "ml_perf_bleu_metric_test",
+    srcs = ["ml_perf_bleu_metric_test.py"],
+    python_version = "PY3",
+    deps = [
+        ":ml_perf_bleu_metric",
+        ":test_utils",
+        "//lingvo:compat",
+        # Implicit six dependency.
+    ],
 )
 
 py_test(
@@ -1100,6 +1125,22 @@ py_library(
         "//lingvo:compat",
         "//lingvo/core/ops",
         # Implicit tensorflow python framework_for_generated_wrappers dependency.
+    ],
+)
+
+py_test(
+    name = "generic_input_test",
+    srcs = ["generic_input_test.py"],
+    python_version = "PY3",
+    deps = [
+        ":generic_input",
+        ":py_utils",
+        ":test_utils",
+        # Implicit absl.testing.parameterized dependency.
+        "//lingvo:compat",
+        # Implicit numpy dependency.
+        # Implicit six dependency.
+        # Implicit tensorflow dependency.
     ],
 )
 

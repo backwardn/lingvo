@@ -69,7 +69,7 @@ class BaseTaskTest(test_utils.TestCase):
 
     FLAGS.enable_check_numerics = False
     with self.session():
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       self.assertEqual(1.0, scaled_grads_map.grad_scale.eval())
       # The final gradient must be finite.
       self.assertFalse(
@@ -91,7 +91,7 @@ class BaseTaskTest(test_utils.TestCase):
     scaled_grads_map = task.learners[0].ScaleGradients(var_grads)
 
     with self.session():
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       self.assertEqual(0., scaled_grads_map.grad_scale.eval())
       # The final gradient must be finite.
       self.assertFalse(
@@ -114,7 +114,7 @@ class BaseTaskTest(test_utils.TestCase):
     scaled_grads_map = task.learners[0].ScaleGradients(var_grads)
 
     with self.session():
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       self.assertEqual(0., scaled_grads_map.grad_scale.eval())
       # The final gradient must be finite.
       self.assertFalse(
@@ -138,7 +138,7 @@ class BaseTaskTest(test_utils.TestCase):
     scaled_grads_map = task.learners[0].ScaleGradients(var_grads)
 
     with self.session():
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       self.assertEqual(0., scaled_grads_map.grad_scale.eval())
       # Fetching the gradient raises an exception with enable_check_numerics.
       with self.assertRaisesRegex(tf.errors.InvalidArgumentError,
@@ -183,7 +183,7 @@ class BaseTaskTest(test_utils.TestCase):
 
     FLAGS.enable_check_numerics = False
     with self.session():
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
 
       # Each variable is clipped indipendently to grad scale of 1.
       self.assertAllClose(scaled_grads_map.final_var_grads.a[1].eval(), 1.0)
@@ -267,8 +267,8 @@ class DistillationTaskTest(test_utils.TestCase):
     # Expected side effects of BProp().
     self.assertIsNotNone(task.train_op)
 
-    with self.session() as sess:
-      tf.global_variables_initializer().run()
+    with self.session():
+      self.evaluate(tf.global_variables_initializer())
 
       variables = {}
       values_before_training = {}
@@ -278,13 +278,13 @@ class DistillationTaskTest(test_utils.TestCase):
             k: v
             for k, v in getattr(task, child).vars.FlattenItems()
         }
-        values_before_training[child] = sess.run(variables[child])
+        values_before_training[child] = self.evaluate(variables[child])
 
       # Train for a few steps.
       for _ in range(10):
-        sess.run(task.train_op)
+        self.evaluate(task.train_op)
       for child in ('teacher', 'student'):
-        values_after_training[child] = sess.run(variables[child])
+        values_after_training[child] = self.evaluate(variables[child])
       return values_before_training, values_after_training
 
   def testFProp(self):
@@ -446,9 +446,9 @@ class MultiTaskModelTest(test_utils.TestCase):
     task_counts = {'a': 0, 'b': 0}
 
     # initialize tensorflow graph and global step
-    with self.session() as sess:
-      tf.global_variables_initializer().run()
-      global_step = sess.run(model.global_step)
+    with self.session():
+      self.evaluate(tf.global_variables_initializer())
+      global_step = self.evaluate(model.global_step)
       for _ in range(100):
         task = model.SampleTask(global_step)
         task_counts[task_to_id[task]] += 1

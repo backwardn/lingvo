@@ -25,7 +25,7 @@ import numpy as np
 class AttentionStepsTest(test_utils.TestCase):
 
   def testAttentionStep(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       np.random.seed(12345)
       src_batch_size = 3
       target_batch_size = 6
@@ -65,8 +65,8 @@ class AttentionStepsTest(test_utils.TestCase):
       output, state1 = step.FProp(step.theta, packed, step_inputs, step_padding,
                                   state0)
 
-      tf.global_variables_initializer().run()
-      output, state1 = sess.run([output, state1])
+      self.evaluate(tf.global_variables_initializer())
+      output, state1 = self.evaluate([output, state1])
 
       self.assertAllClose(
           output, {
@@ -96,7 +96,7 @@ class AttentionStepsTest(test_utils.TestCase):
           })
 
   def testAttentionBlockStep(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       np.random.seed(12345)
       src_batch_size = 3
       target_batch_size = 6
@@ -131,8 +131,8 @@ class AttentionStepsTest(test_utils.TestCase):
       output, state1 = step.FProp(step.theta, packed, None, step_padding,
                                   state0)
 
-      tf.global_variables_initializer().run()
-      output, state1 = sess.run([output, state1])
+      self.evaluate(tf.global_variables_initializer())
+      output, state1 = self.evaluate([output, state1])
 
       self.assertAllClose(
           output, {

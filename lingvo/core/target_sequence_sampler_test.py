@@ -26,7 +26,7 @@ import numpy as np
 class TargetSequenceSamplerTest(test_utils.TestCase):
 
   def testTargetSequenceSampler(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       np.random.seed(9384758)
       tf.random.set_seed(8274758)
       vocab_size = 12
@@ -70,7 +70,7 @@ class TargetSequenceSamplerTest(test_utils.TestCase):
           theta, encoder_outputs, random_seed, InitBeamSearchCallBack,
           PreBeamSearchStepCallback, PostBeamSearchStepCallback)
 
-      ids, lens = sess.run([
+      ids, lens = self.evaluate([
           decoder_output.ids,
           tf.reduce_sum(1 - decoder_output.paddings, 1),
       ])
@@ -88,7 +88,7 @@ class TargetSequenceSamplerTest(test_utils.TestCase):
           theta, encoder_outputs, random_seed, InitBeamSearchCallBack,
           PreBeamSearchStepCallback, PostBeamSearchStepCallback)
 
-      ids, lens = sess.run([
+      ids, lens = self.evaluate([
           decoder_output.ids,
           tf.reduce_sum(1 - decoder_output.paddings, 1),
       ])
@@ -100,7 +100,7 @@ class TargetSequenceSamplerTest(test_utils.TestCase):
       self.assertAllEqual(expected_lens, lens)
 
   def testTargetSequenceSamplerWithEOC(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       np.random.seed(9384758)
       tf.random.set_seed(8274758)
       vocab_size = 4
@@ -156,7 +156,7 @@ class TargetSequenceSamplerTest(test_utils.TestCase):
           theta, encoder_outputs, random_seed, InitBeamSearchCallBack,
           PreBeamSearchStepCallback, PostBeamSearchStepCallback)
 
-      ids, lens = sess.run([
+      ids, lens = self.evaluate([
           decoder_output.ids,
           tf.reduce_sum(1 - decoder_output.paddings, 1),
       ])
@@ -171,7 +171,7 @@ class TargetSequenceSamplerTest(test_utils.TestCase):
       self.assertAllEqual(expected_lens, lens)
 
   def testTargetSequenceSamplerWithVariables(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       np.random.seed(9384758)
       tf.random.set_seed(8274758)
       hidden_dim = 8
@@ -220,8 +220,8 @@ class TargetSequenceSamplerTest(test_utils.TestCase):
                                           PreBeamSearchStepCallback,
                                           PostBeamSearchStepCallback)
 
-      sess.run(tf.global_variables_initializer())
-      ids, lens = sess.run([
+      self.evaluate(tf.global_variables_initializer())
+      ids, lens = self.evaluate([
           decoder_output.ids,
           tf.reduce_sum(1 - decoder_output.paddings, 1),
       ])

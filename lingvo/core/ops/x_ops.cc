@@ -760,5 +760,180 @@ sequences: A vector of shape [batch]. The converted string sequence.
 vocab_filepath: filepath to the MLPerf subword vocab file.
 )doc");
 
+REGISTER_OP("PackSequences")
+    .Input("src_actual_seq_len: int32")
+    .Input("tgt_actual_seq_len: int32")
+    .Input("packed_batch_size: int32")
+    .Input("packed_src_seq_len: int32")
+    .Input("packed_tgt_seq_len: int32")
+    .SetIsStateful()
+    .Output("src_segment_ids: int32")
+    .Output("src_segment_pos: int32")
+    .Output("src_indices_in_input: int32")
+    .Output("tgt_segment_ids: int32")
+    .Output("tgt_segment_pos: int32")
+    .Output("tgt_indices_in_input: int32")
+    .Attr("seed: int = 0")
+    .Doc(R"doc(
+Produces a packing pattern for the (src, tgt) input pair with the provided
+lengths, according to the given packed shape.
+
+src_actual_seq_len: A tensor of shape [N], where N is the input batch size.
+  This tensor contains the actual lengths for the src sequence.
+tgt_actual_seq_len: A tensor of shape [N], where N is the input batch size.
+  This tensor contains the actual lengths for the tgt sequence.
+packed_batch_size: A scalar. The output batch size. The packed output will
+  be of shape [packed_batch_size, packed_{src,tgt}_seq_len] for src and tgt,
+  respectively.
+packed_src_seq_len: A scalar. The output sequence length for src. A src input
+  with shape [N, src_input_seq_len] will be packed into an output with shape
+  [packed_batch_size, packed_src_seq_len].
+packed_tgt_seq_len: A scalar. The output sequence length for tgt. A tgt input
+  with shape [N, tgt_input_seq_len] will be packed into an output with shape
+  [packed_batch_size, packed_tgt_seq_len].
+
+{src,tgt}_segment_ids: A tensor of shape [packed_batch_size,
+  packed_{src,tgt}_seq_len]. Incrementing from 1 to indicate each segment in the
+  packed output, for src and tgt, respectively. Zero is reserved for indicating
+  padding at the end of each row.
+{src,tgt}_segment_pos: A tensor of shape [packed_batch_size,
+  packed_{src,tgt}_seq_len]. Zero-based index to indicate relative position
+  within each segment, for src and tgt, respectively. Zero is also used to
+  indicate padding. When needed, use `{src,tgt}_segment_ids` to disambiguate.
+{src,tgt}_indices_in_input: A tensor of shape [packed_batch_size,
+  packed_{src,tgt}_seq_len]. For each segment in the packed output, it contains
+  the original (zero-based) row index of each segment found in
+  `{src,tgt}_actual_seq_len`, respectively. Zero is also used to indicate
+  padding. When needed, use `{src,tgt}_segment_ids` to disambiguate.
+
+seed: Seed for random number generator, which is used when we need to drop
+  excessive input sequences. If seed is zero, use completely random seed.
+
+For example, the following input:
+  src_actual_seq_len = [3, 2, 1]
+  tgt_actual_seq_len = [4, 1, 5]
+  packed_batch_size = 2
+  packed_src_seq_len = 5
+  packed_tgt_seq_len = 5
+will result in:
+  src_segment_ids = [ [1, 1, 1, 2, 2], [1, 0, 0, 0, 0] ]
+  src_segment_pos = [ [0, 1, 2, 0, 1], [0, 0, 0, 0, 0] ]
+  src_indices_in_input = [ [0, 0, 0, 1, 1], [2, 0, 0, 0, 0] ]
+  tgt_segment_ids = [ [1, 1, 1, 1, 2], [1, 1, 1, 1, 1] ]
+  tgt_segment_pos = [ [0, 1, 2, 3, 0], [0, 1, 2, 3, 4] ]
+  tgt_indices_in_input = [ [0, 0, 0, 0, 1], [2, 2, 2, 2, 2] ]
+
+The packed sequence length can be different between src and tgt. For example,
+the following input:
+  src_actual_seq_len = [3, 2, 1]
+  tgt_actual_seq_len = [4, 1, 5]
+  packed_batch_size = 2
+  packed_src_seq_len = 4
+  packed_tgt_seq_len = 6
+will result in:
+  src_segment_ids = [ [1, 1, 1, 0], [1, 1, 2, 0] ]
+  src_segment_pos = [ [0, 1, 2, 0], [0, 1, 0, 0] ]
+  src_indices_in_input = [ [0, 0, 0, 0], [1, 1, 2, 0] ]
+  tgt_segment_ids = [ [1, 1, 1, 1, 0, 0], [1, 2, 2, 2, 2, 2] ]
+  tgt_segment_pos = [ [0, 1, 2, 3, 0, 0], [0, 0, 1, 2, 3, 4] ]
+  tgt_indices_in_input = [ [0, 0, 0, 0, 0, 0], [1, 2, 2, 2, 2, 2] ]
+
+If there are too few input sequences to pack into `output_shape`, the op pads
+the remaining elements in the output.
+
+If there are too many input sequences to pack into `output_shape`, the op drops
+input sequences. The dropping is done randomly uniformly on the input sequences
+to not bias the distribution of sequence lengths in the packed output.
+ )doc");
+
+REGISTER_OP("ApplyPacking")
+    .Input("input: T")
+    .Input("padding: T")
+    .Input("segment_ids: int32")
+    .Input("indices_in_input: int32")
+    .Output("output: T")
+    .Attr("T: type")
+    .Doc(R"doc(
+Applies a packing pattern on the input to obtain a packed output.
+
+A slightly different semantics when T is tf.string type: the output joins the
+strings that are packed on the same row, separated by `padding`.
+
+input: A tensor of shape [N, seq_len]. The input to apply the packing to.
+  For tf.string typed input, a vector of shape [N] is expected.
+padding: A scalar to indicate the padding value. This is typically the zero
+  value of T, but may not always be the case, e.g. when the input is a paddings
+  tensor, in which case caller should set padding=1.
+  For tf.string typed input, padding is used as a separator to join all the
+  strings on the same row in the output.
+segment_ids: A rank 2 tensor of shape `output_shape`.
+indices_in_input: A rank 2 tensor of shape `output_shape`.
+
+output: A tensor of shape `output_shape`. For tf.string typed input, the output
+  is a vector of strings where its length is the same as the number of rows in
+  `output_shape`.
+
+The inputs `segment_ids` and `indices_in_input` can be obtained from the outputs
+of an `PackSequence` op (though only the src or the tgt tensors are needed).
+
+Note that ApplyPacking is done on a per column basis (either on the src or on
+the tgt), as opposed to in PackSequences, when both src and tgt columns must be
+processed together within the same op.
+ )doc");
+
+REGISTER_OP("Mass")
+    .Input("ids: int32")
+    .Input("weights: float32")
+    .Input("actual_seq_len: int32")
+    .Attr("mask_id: int")
+    .Attr("mask_ratio: float = 0.5")
+    .Attr("mask_minlen: int = 0")
+    .Attr("span_len: int = 100000")
+    .Attr("random_start_prob: float = 0.6")
+    .Attr("keep_prob: float = 0.1")
+    .Attr("rand_prob: float = 0.1")
+    .Attr("mask_prob: float = 0.8")
+    // TODO(alisonlui): This flag is rarely used; remove after verification.
+    .Attr("mask_target: bool = True")
+    .Attr("vocab_size: int")
+    .Attr("first_unreserved_id: int = 4")
+    .Output("src_ids: int32")
+    .Output("tgt_ids: int32")
+    .Output("tgt_labels: int32")
+    .Output("tgt_weights: float32")
+    .Doc(R"doc(
+Applies masking to implement MASS.
+
+ids: Tensor of shape [batch_size, max_seq_len] containing the token ids.
+  Should include EOS token </s>.
+weights: Tensor of shape [batch_size, max_seq_len].
+actual_seq_len: Tensor of shape [batch_size].
+
+mask_id: The id to use for the mask token.
+mask_ratio: Proportion of src to mask.
+mask_minlen: Skip sentences too short to mask at least this many tokens.
+span_len: Split mask_len into segments of this size and randomly distribute
+those across the src.
+random_start_prob: The probability that the placement of masked segments will be
+  entirely random. The remaining cases are split evenly between masking at the
+  beginning and at the end of the src.
+keep_prob/rand_prob/mask_prob: The probability that a token to be masked will
+be unchanged, replaced with a random token in the vocab, or replaced with the
+mask_id, respectively. Must sum to 1.
+mask_target: whether to mask the target (the mask will be the inverse of that of
+  the src).
+vocab_size: Vocab size used when selecting a random token to replace a masked
+  token.
+first_unreserved_id: Tokens greater than or equal to this may be selected at
+  random to replace a masked token.
+
+src_ids: Masked ids. E.g. s1 s2 s3 m m </s>
+tgt_ids: Right-shifted ids with BOS token added, where the mask is the
+  positional inverse of that of the source unless mask_target=False.
+  E.g. m m m s3 s4 m
+tgt_labels: E.g. s1 s2 s3 s4 s5 </s>
+tgt_weights: weights are zeroed wherever the target is masked.
+)doc");
+
 }  // namespace
 }  // namespace tensorflow

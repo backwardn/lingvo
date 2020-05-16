@@ -48,6 +48,7 @@ from model_pruning.python import pruning
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.core.framework import node_def_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
+from tensorflow.python.framework import func_graph
 from tensorflow.python.framework import function
 from tensorflow.python.ops import init_ops
 from tensorflow.python.tpu import tpu_function
@@ -604,7 +605,7 @@ def SetTpuDeviceAssignment(tpu_device_assignment):
   global _tpu_device_assignment
   if _tpu_device_assignment is not None:
     tf.logging.warning('tpu_device_assignment was already set, '
-                            'overwriting with new assignment.')
+                       'overwriting with new assignment.')
   _tpu_device_assignment = tpu_device_assignment
 
 
@@ -618,13 +619,17 @@ def GetTpuDeviceAssignment():
   return _tpu_device_assignment
 
 
-def SessionConfig(soft_placement=True, inline=True, cluster_def=None):
+def SessionConfig(soft_placement=True,
+                  inline=True,
+                  cluster_def=None,
+                  disable_meta_optimizer=False):
   """Returns a session config proto.
 
   Args:
     soft_placement: Turns allow_soft_placement on iff True.
     inline: Turns do_function_inlining on iff True.
     cluster_def: A tf.train.ClusterDef describing the cluster.
+    disable_meta_optimizer: Turns off grappler/metagraph optimizer.
 
   Returns:
     A TF session config proto.
@@ -635,6 +640,10 @@ def SessionConfig(soft_placement=True, inline=True, cluster_def=None):
           optimizer_options=tf.OptimizerOptions(
               opt_level=tf.OptimizerOptions.L1, do_function_inlining=inline)),
       cluster_def=cluster_def)
+
+  if disable_meta_optimizer:
+    # Useful if start-up time is critical.
+    session_config.graph_options.rewrite_options.disable_meta_optimizer = True
   # Disable layout optimizer which increases GPU memory usage.
   session_config.graph_options.rewrite_options.layout_optimizer = (
       rewriter_config_pb2.RewriterConfig.OFF)
@@ -988,10 +997,10 @@ class _Unique(object):
     self._vset = set()
 
   def __call__(self, v):
-    if (v is None) or (v in self._vset):
+    if (v is None) or (id(v) in self._vset):
       return False
     else:
-      self._vset.add(v)
+      self._vset.add(id(v))
       return True
 
 
@@ -1412,8 +1421,7 @@ def GetVariableName(name):
         matched = True
         new_name = name_format % match.groups()
   if new_name != name:
-    tf.logging.info("WARNING!!! Renaming variable '%s' to '%s'", name,
-                         new_name)
+    tf.logging.info("WARNING!!! Renaming variable '%s' to '%s'", name, new_name)
   return new_name
 
 
@@ -1683,7 +1691,7 @@ def CreateVariable(name,
                          (cached.ToText(), p.ToText()))
   else:
     tf.logging.info('Creating var %s shape=%s on device %s', var.name,
-                         var.shape, var.device)
+                    var.shape, var.device)
     all_vars[var_ref] = p.Copy()
     for col in p.collections:
       tf.add_to_collection(col, var)
@@ -2208,6 +2216,7 @@ def ApplyGradMultiplier(vs_gs, grad_scale=None):
     grad_scale is 0, the result gradient is always 0, even if the input
     gradient is inf or nan.
   """
+
   def ScaleOrZero(var, grad, scale):
     grad = CheckNumerics(grad, 'Gradient for %s is not finite.' % var.name)
     return tf.where(
@@ -2271,6 +2280,7 @@ def ApplyGradNormClipping(vs_gs, norm=1.0):
     grad_scale is 0, the result gradient is always 0, even if the input
     gradient is inf or nan.
   """
+
   def ClipByNorm(var, grad, norm):
     grad = CheckNumerics(grad, 'Gradient for %s is not finite.' % var.name)
     return tf.clip_by_norm(grad, norm)
@@ -3014,7 +3024,7 @@ def PiecewiseConstant(x_in, boundaries, values, vdtype):
   bs = tf.convert_to_tensor(boundaries, dtype=tf.float32)
   vs = tf.convert_to_tensor(values, dtype=vdtype)
   # The following is equivalent to 'return vs[index]'.
-  index = tf.reduce_sum(tf.cast(tf.greater(x_in, bs), tf.int32))
+  index = tf.reduce_sum(tf.cast(tf.greater_equal(x_in, bs), tf.int32))
   one_hot_vec = tf.one_hot(
       tf.expand_dims(index, 0), depth=len(values), dtype=vdtype)
   return Matmul(tf.reshape(vs, (1, -1)), tf.transpose(one_hot_vec))[0][0]
@@ -3275,10 +3285,10 @@ def ConcatenatePaddedSequences(input0, input1, padding0, padding1, seq_dim=1):
       assert_equal(GetShape(input0)[batch_dim], batch_size),
       assert_equal(GetShape(padding1)[batch_dim], batch_size)
   ], input0)
-  input0_seq_dim = tf.to_int32(
-      tf.tile([tf.shape(padding0)[seq_dim]], [batch_size]))
-  input1_seq_dim = tf.to_int32(
-      tf.tile([tf.shape(padding1)[seq_dim]], [batch_size]))
+  input0_seq_dim = tf.cast(
+      tf.tile([tf.shape(padding0)[seq_dim]], [batch_size]), dtype=tf.int32)
+  input1_seq_dim = tf.cast(
+      tf.tile([tf.shape(padding1)[seq_dim]], [batch_size]), dtype=tf.int32)
   # LengthsFromPaddings assumes that paddings is of size [batch, max_length].
   if seq_dim == 1:
     seq_length0 = LengthsFromPaddings(padding0)
@@ -3289,12 +3299,14 @@ def ConcatenatePaddedSequences(input0, input1, padding0, padding1, seq_dim=1):
   # We assume that the tensors have no leading paddings.
   # TODO(arunnt): Concatenate tensors with leading paddings correctly.
   seq_length0 = with_dependencies([
-      assert_equal(seq_length0,
-                   tf.to_int32(tf.reduce_sum(1.0 - padding0, seq_dim)))
+      assert_equal(
+          seq_length0,
+          tf.cast(tf.reduce_sum(1.0 - padding0, seq_dim), dtype=tf.int32))
   ], seq_length0)
   seq_length1 = with_dependencies([
-      assert_equal(seq_length1,
-                   tf.to_int32(tf.reduce_sum(1.0 - padding1, seq_dim)))
+      assert_equal(
+          seq_length1,
+          tf.cast(tf.reduce_sum(1.0 - padding1, seq_dim), dtype=tf.int32))
   ], seq_length1)
   # Concatenate input sequences.
   reversed_input0 = tf.reverse_sequence(
@@ -3337,13 +3349,15 @@ def RetryOnTransientTfError(*args, **kwargs):
   return Retry(transient_tf_errors, *args, **kwargs)
 
 
-def PadOrTrimTo(x, shape, pad_val=0):
+def PadOrTrimTo(x, shape, pad_val=0, pad_after_contents=True):
   """Pad and slice x to the given shape.
 
   Args:
     x: A tensor.
     shape: The shape of the returned tensor.
     pad_val: An int or float used to pad x.
+    pad_after_contents: Whether to pad and trim after the original contents
+      of each dimension.
 
   Returns:
     'x' is padded with pad_val and sliced so that the result has the given
@@ -3363,13 +3377,25 @@ def PadOrTrimTo(x, shape, pad_val=0):
     shape = HasRank(shape, 1)
     expected_rank = tf.size(shape)
   x = HasRank(x, expected_rank)
-  # If dim-i is less than shape[i], pads on the right shape[i] -
-  # dim-i.  Otherwise, pads [0, 0] for dim-i.
+
   pad = shape - tf.minimum(tf.shape(x), shape)
   zeros = tf.zeros_like(pad)
-  x = tf.pad(x, tf.stack([zeros, pad], axis=1), constant_values=pad_val)
-  # If dim-i is larger than shape[i], we slice [0:shape[i]] for dim-i.
-  return tf.reshape(tf.slice(x, zeros, shape), shape)
+  if pad_after_contents:
+    # If dim_i is less than shape[i], pads after contents.
+    paddings = tf.stack([zeros, pad], axis=1)
+    # If dim_i is larger than shape[i], we slice [0:shape[i]] for dim_i.
+    slice_begin = zeros
+  else:
+    # If dim_i is less than shape[i], pads before contents.
+    paddings = tf.stack([pad, zeros], axis=1)
+    # If dim-i is larger than shape[i], we slice [dim_i - shape[i]:dim_i]
+    # for dim_i.
+    slice_begin = tf.shape(x) + pad - shape
+
+  x = tf.pad(x, paddings, constant_values=pad_val)
+  x = tf.slice(x, slice_begin, shape)
+
+  return tf.reshape(x, shape)
 
 
 def RepeatDim(tensor, multiple, axis):
@@ -3606,9 +3632,9 @@ def RematerializeFn(fn, *xs):
     ResetStepSeed(initial_step_seed)
     ys = fn(*fwd_xs)
     # Some sanity check.
-    assert not function.get_extra_inputs()
-    assert not function.get_extra_args()
-    assert not function.get_extra_vars()
+    assert not GetExtraInputs()
+    assert not GetExtraArgs()
+    assert not GetExtraVars()
     if isinstance(ys, tuple):
       for y in ys:
         assert isinstance(y, tf.Tensor)
@@ -4224,3 +4250,59 @@ def GetTpuSummaryTensors():
       '%s/%s' % (x.name, SanitizeScopeKey(x.name_scope)): x.value
       for x in tpu_summary_tensors
   }
+
+
+def ComputationShape(split_size):
+  """Decides the computation shape based on the split_size."""
+  computation_shape = None
+  if split_size == 1:
+    computation_shape = [1, 1, 1, 1]
+  elif split_size == 2:
+    computation_shape = [1, 1, 1, 2]
+  elif split_size == 4:
+    computation_shape = [1, 2, 1, 2]
+  elif split_size == 8:
+    computation_shape = [2, 2, 1, 2]
+  elif split_size == 16:
+    computation_shape = [4, 2, 1, 2]
+  elif split_size == 32:
+    computation_shape = [4, 4, 1, 2]
+  elif split_size == 64:
+    computation_shape = [4, 8, 1, 2]
+  elif split_size == 128:
+    computation_shape = [8, 8, 1, 2]
+  elif split_size == 256:
+    computation_shape = [8, 16, 1, 2]
+  elif split_size == 512:
+    computation_shape = [16, 16, 1, 2]
+  elif split_size == 2048:
+    computation_shape = [32, 32, 1, 2]
+  else:
+    assert False, ('Model parallelism with %d devices is currently not'
+                   ' supported.' % split_size)
+  assert computation_shape is not None
+  return computation_shape
+
+
+def GetExtraVars():
+  """Returns the captured variables by the function."""
+  g = tf.get_default_graph()
+  if isinstance(g, func_graph.FuncGraph):
+    return g.variable_captures
+  return function.get_extra_vars()
+
+
+def GetExtraInputs():
+  """Returns the captured input tensors by the function."""
+  g = tf.get_default_graph()
+  if isinstance(g, func_graph.FuncGraph):
+    return g.external_captures
+  return function.get_extra_inputs()
+
+
+def GetExtraArgs():
+  """Returns the corresponding function arguments for the captured inputs."""
+  g = tf.get_default_graph()
+  if isinstance(g, func_graph.FuncGraph):
+    return g.internal_captures
+  return function.get_extra_args()

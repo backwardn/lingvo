@@ -80,14 +80,14 @@ class EmaTest(test_utils.TestCase):
     mean_1_ema = mean_1 * .1
     with self.session() as sess:
       # Test EMA values.
-      sess.run(tf.global_variables_initializer())
-      sess.run(tf.assign(py_utils.GetOrCreateGlobalStepVar(), global_step))
-      sess.run(tf.assign(beta, beta_1))
-      sess.run(tf.assign(mean, mean_1))
-      sess.run(task._post_train_ops)
+      self.evaluate(tf.global_variables_initializer())
+      self.evaluate(tf.assign(py_utils.GetOrCreateGlobalStepVar(), global_step))
+      self.evaluate(tf.assign(beta, beta_1))
+      self.evaluate(tf.assign(mean, mean_1))
+      self.evaluate(task._post_train_ops)
 
       self.assertAllClose([beta_1, beta_1_ema, mean_1, mean_1_ema],
-                          sess.run([
+                          self.evaluate([
                               beta,
                               model.ema.average(beta), mean,
                               model.ema.average(mean)
@@ -120,7 +120,7 @@ class EmaTest(test_utils.TestCase):
       saver.RestoreIfNeeded(sess)
 
       self.assertAllClose([beta_1, beta_1_ema, mean_1, mean_1_ema],
-                          sess.run([
+                          self.evaluate([
                               beta,
                               model.ema.average(beta), mean,
                               model.ema.average(mean)
@@ -143,7 +143,7 @@ class EmaTest(test_utils.TestCase):
       saver.RestoreIfNeeded(sess)
 
       # Both beta and mean should use the EMA value.
-      self.assertAllClose([beta_1_ema, mean_1_ema], sess.run([beta, mean]))
+      self.assertAllClose([beta_1_ema, mean_1_ema], self.evaluate([beta, mean]))
 
 
 if __name__ == '__main__':

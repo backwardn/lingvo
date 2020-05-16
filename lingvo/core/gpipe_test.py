@@ -159,7 +159,7 @@ class DummyPipelineCnnTest(test_utils.TestCase):
                               micro_batch_size=None):
     num_micro_batches = 8
     batch_size = 16
-    with self.session(graph=tf.Graph()) as sess:
+    with self.session(graph=tf.Graph()):
       tf.random.set_seed(1245)
       inputs = tf.random.uniform([batch_size, 8, 8, 1], seed=12345)
       if auto_partition:
@@ -189,15 +189,15 @@ class DummyPipelineCnnTest(test_utils.TestCase):
       grad_norm = tf.sqrt(py_utils.SumSquared(grads))
       ts = net.GetAccumulatorValues().Flatten()
 
-      sess.run(tf.global_variables_initializer())
-      grad_norm_val, ts_vals = sess.run([grad_norm, ts])
+      self.evaluate(tf.global_variables_initializer())
+      grad_norm_val, ts_vals = self.evaluate([grad_norm, ts])
       test_utils.CompareToGoldenSingleFloat(self, 0.268087, grad_norm_val)
       # Accumulator values should be equal to number of time steps in pipeline.
       for ts_val in list(ts_vals):
         expected_ts = num_micro_batches if num_splits > 1 else 1
         self.assertEqual(ts_val, expected_ts)
       if aux_logits is not None:
-        aux_logit_tensor = sess.run(aux_logits)
+        aux_logit_tensor = self.evaluate(aux_logits)
         self.assertEqual(aux_logit_tensor.shape, (batch_size, 8, 8, 1))
 
   def testDummyPipelineCnnOneSplit(self):
@@ -226,7 +226,7 @@ class DummyPipelineCnnTest(test_utils.TestCase):
     batch_size = 16
     num_layers = 4
     cells = []
-    with self.session(graph=tf.Graph()) as sess:
+    with self.session(graph=tf.Graph()):
       for i in range(num_layers):
         cells.append(_SimpyLayerWithNestedMapInput.Params().Set(
             name='layer_{}'.format(i)))
@@ -242,8 +242,8 @@ class DummyPipelineCnnTest(test_utils.TestCase):
       inputs = tf.random.uniform([batch_size, 8, 8, 1], seed=12345)
       outputs = layer.FPropDefaultTheta(
           py_utils.NestedMap(vec=inputs, paddings=None))
-      sess.run(tf.global_variables_initializer())
-      sess.run(outputs.vec)
+      self.evaluate(tf.global_variables_initializer())
+      self.evaluate(outputs.vec)
       self.assertEqual(outputs.vec.shape, (batch_size, 8, 8, 1))
 
 

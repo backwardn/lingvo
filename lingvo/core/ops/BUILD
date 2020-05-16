@@ -60,7 +60,9 @@ cc_library(
         ":best_step_op_kernels",
         ":functional_ops_kernels",
         ":generic_input_op_kernels",
+        ":mass_op",
         ":ml_perf_subword_op",
+        ":pack_ops",
         ":preconditioner_op_kernels",
         ":random_ops_kernels",
         ":static_map_op",
@@ -202,6 +204,20 @@ lingvo_cc_test_library(
     ],
 )
 
+lingvo_cc_library(
+    name = "text_packing",
+    srcs = ["text_packing.cc"],
+    hdrs = ["text_packing.h"],
+)
+
+lingvo_cc_test(
+    name = "text_packing_test",
+    srcs = ["text_packing_test.cc"],
+    deps = [
+        ":text_packing",
+    ],
+)
+
 ###################### Op kernel implementations.
 
 custom_kernel_library(
@@ -329,22 +345,6 @@ custom_kernel_library(
     deps = [":input_common"],
 )
 
-py_test(
-    name = "generic_input_op_test",
-    srcs = ["generic_input_op_test.py"],
-    python_version = "PY3",
-    deps = [
-        # Implicit absl.testing.parameterized dependency.
-        "//lingvo:compat",
-        "//lingvo/core:generic_input",
-        "//lingvo/core:py_utils",
-        "//lingvo/core:test_utils",
-        # Implicit numpy dependency.
-        # Implicit six dependency.
-        # Implicit tensorflow dependency.
-    ],
-)
-
 custom_kernel_library(
     name = "random_ops_kernels",
     srcs = ["random_ops_kernels.cc"],
@@ -431,6 +431,50 @@ py_test(
         ":ops",
         "//lingvo/core:test_helper",
         "//lingvo/core:test_utils",
+        # Implicit tensorflow dependency.
+    ],
+)
+
+custom_kernel_library(
+    name = "pack_ops",
+    srcs = ["pack_ops.cc"],
+    op_def_lib = [":x_ops"],
+    deps = [
+        ":mutex",
+        ":text_packing",
+        # Implicit absl.container.flat_hash_map dependency.
+        # Implicit absl.strings dependency.
+    ],
+)
+
+py_test(
+    name = "pack_ops_test",
+    srcs = ["pack_ops_test.py"],
+    python_version = "PY3",
+    deps = [
+        ":ops",
+        "//lingvo:compat",
+        "//lingvo/core:test_utils",
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
+    ],
+)
+
+custom_kernel_library(
+    name = "mass_op",
+    srcs = ["mass_op.cc"],
+    op_def_lib = [":x_ops"],
+)
+
+py_test(
+    name = "mass_op_test",
+    srcs = ["mass_op_test.py"],
+    python_version = "PY3",
+    deps = [
+        ":ops",
+        "//lingvo:compat",
+        "//lingvo/core:test_utils",
+        # Implicit numpy dependency.
         # Implicit tensorflow dependency.
     ],
 )

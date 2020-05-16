@@ -48,7 +48,7 @@ class EncoderTest(test_utils.TestCase):
       batch.paddings = tf.zeros([2, 4])
       enc_out = mt_enc.FPropDefaultTheta(batch).encoded
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out = enc_out.eval()
       expected_enc_out = [
           [[1.5309354e-06, -1.7816075e-07, 3.8047763e-06, -5.6422067e-07],
@@ -86,7 +86,7 @@ class EncoderTest(test_utils.TestCase):
     return p
 
   def testBiEncoderForwardPassWithInputPacking(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       with tf.variable_scope('bienc_test', reuse=tf.AUTO_REUSE):
         bs = 3
         sl = 3
@@ -115,8 +115,8 @@ class EncoderTest(test_utils.TestCase):
         packed_enc_out = mt_enc_packed.FPropDefaultTheta(packed_batch)
         packed_enc_out = tf.reshape(packed_enc_out.encoded, tf.shape(enc_out))
 
-        tf.global_variables_initializer().run()
-        actual_enc_out, actual_packed_enc_out = sess.run(
+        self.evaluate(tf.global_variables_initializer())
+        actual_enc_out, actual_packed_enc_out = self.evaluate(
             [enc_out, packed_enc_out])
         self.assertAllClose(actual_packed_enc_out, actual_enc_out)
 
@@ -135,7 +135,7 @@ class EncoderTest(test_utils.TestCase):
       batch.paddings = tf.zeros([2, 4])
       enc_out = mt_enc.FPropDefaultTheta(batch).encoded
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out = enc_out.eval()
       expected_enc_out = [[[4.3564430e-07, -2.3954138e-07],
                            [-9.8339186e-08, 8.5873717e-07]],
@@ -157,7 +157,7 @@ class EncoderTest(test_utils.TestCase):
       batch.paddings = tf.zeros([2, 4])
       enc_out = mt_enc.FPropDefaultTheta(batch).encoded
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out = enc_out.eval()
       expected_enc_out = [[[4.0744379e-07, -2.0108675e-06],
                            [-4.2056736e-06, 9.2221135e-06]],
@@ -180,7 +180,7 @@ class EncoderTest(test_utils.TestCase):
       batch.paddings = tf.zeros([2, 4])
       enc_out = mt_enc.FPropDefaultTheta(batch).encoded
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out = enc_out.eval()
       print('bi_enc_actual_enc_out_with_dropout', np.array_repr(actual_enc_out))
       expected_enc_out = [[[1.60383240e-06, 1.22550023e-06],
@@ -204,7 +204,7 @@ class EncoderTest(test_utils.TestCase):
       batch.paddings = tf.zeros([2, 4])
       enc_out = mt_enc.FPropDefaultTheta(batch).encoded
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out = enc_out.eval()
       expected_enc_out = [[[-7.4536911e-05, 8.8465633e-05],
                            [2.8940600e-05, 3.2297492e-05]],
@@ -246,7 +246,7 @@ class TransformerEncoderTest(test_utils.TestCase):
     _ = encoder.TransformerEncoder(p)
 
   def testForwardPass(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       bs = 2
       sl = 21
       tf.random.set_seed(8372749040)
@@ -261,9 +261,9 @@ class TransformerEncoderTest(test_utils.TestCase):
       emb_out_sum = tf.reduce_sum(out.embedded_inputs, 0)
       enc_padding = out.padding
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out, actual_enc_out_sum, actual_emb_out_sum, \
-          actual_padding = sess.run(
+          actual_padding = self.evaluate(
               [out.encoded, enc_out_sum, emb_out_sum, enc_padding])
 
       # pyformat: disable
@@ -314,7 +314,7 @@ class TransformerEncoderTest(test_utils.TestCase):
       enc_out = mt_enc.FPropDefaultTheta(batch)
       enc_out_sum = tf.reduce_sum(enc_out.encoded, 0)
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out = enc_out_sum.eval()
 
       # pyformat: disable
@@ -354,7 +354,7 @@ class TransformerEncoderTest(test_utils.TestCase):
       enc_out = mt_enc.FPropDefaultTheta(batch)
       enc_out_sum = tf.reduce_sum(enc_out.encoded, 0)
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out = enc_out_sum.eval()
       # pyformat: disable
       # pylint: disable=bad-whitespace
@@ -373,7 +373,7 @@ class TransformerEncoderTest(test_utils.TestCase):
           expected_enc_out, actual_enc_out, rtol=1e-05, atol=1e-05)
 
   def testForwardPassWithInputPacking(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       with tf.variable_scope('transformer_test', reuse=tf.AUTO_REUSE):
         bs = 3
         sl = 3
@@ -405,14 +405,14 @@ class TransformerEncoderTest(test_utils.TestCase):
         enc_out = tf.reduce_sum(enc_out, axis=0)
         packed_enc_out = tf.reduce_sum(packed_enc_out, axis=0)
 
-        tf.global_variables_initializer().run()
-        actual_enc_out, actual_packed_enc_out = sess.run(
+        self.evaluate(tf.global_variables_initializer())
+        actual_enc_out, actual_packed_enc_out = self.evaluate(
             [enc_out, packed_enc_out])
 
         self.assertAllClose(actual_packed_enc_out, actual_enc_out)
 
   def testForwardPassSplitBatch(self):
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       bs = 8
       sl = 20
       tf.random.set_seed(8372749040)
@@ -443,9 +443,9 @@ class TransformerEncoderTest(test_utils.TestCase):
       enc_out2 = out2.encoded
       emb_out2 = out2.embedded_inputs
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       actual_enc_out, actual_enc_out1, actual_enc_out2, \
-          actual_emb_out, actual_emb_out1, actual_emb_out2 = sess.run(
+          actual_emb_out, actual_emb_out1, actual_emb_out2 = self.evaluate(
               [enc_out, enc_out1, enc_out2, emb_out, emb_out1, emb_out2])
       self.assertAllClose(actual_enc_out,
                           np.concatenate([actual_enc_out1, actual_enc_out2], 1))

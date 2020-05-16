@@ -32,6 +32,70 @@ import numpy as np
 from six.moves import range
 
 
+def _FindRecallAtGivenPrecision(precision_recall, precision_level):
+  """Find the recall at given precision level.
+
+  Args:
+    precision_recall: np.array of shape [n, m, 2] where n is the number of
+      classes, m is then number of values in the curve, 2 indexes between
+      precision [0] and recall [1]. np.float32.
+    precision_level: float32. Selected precision level between (0, 1).
+      Typically, this may be 0.95.
+
+  Returns:
+    recall: np.array of shape [n] consisting of recall for all classes
+      where the values are 0.0 if a given precision is never achieved.
+  """
+  # The method for computing precision-recall inserts precision = 0.0
+  # when a particular recall value has not been achieved. The maximum
+  # recall value is therefore the highest recall value when the associated
+  # precision > 0.
+  assert len(precision_recall.shape) == 3, 'Invalid precision recall curve.'
+  assert precision_recall.shape[-1] == 2, 'Invalid precision recall curve.'
+  assert precision_level > 0.0, 'Precision must be greater then 0.'
+  assert precision_level < 1.0, 'Precision must be less then 1.'
+  num_classes = precision_recall.shape[0]
+
+  recall = np.zeros(shape=(num_classes), dtype=np.float32)
+  for i in range(num_classes):
+    precisions = precision_recall[i, :, 0]
+    recalls = precision_recall[i, :, 1]
+    indices_at_precision_level = np.flatnonzero(precisions >= precision_level)
+    if indices_at_precision_level.size > 0:
+      recall[i] = np.max(recalls[indices_at_precision_level])
+  return recall
+
+
+def _FindMaximumRecall(precision_recall):
+  """Find the maximum recall in all precision recall curves.
+
+  Args:
+    precision_recall: np.array of shape [n, m, 2] where n is the number of
+      classes, m is then number of values in the curve, 2 indexes between
+      precision [0] and recall [1]. np.float32.
+
+  Returns:
+    max_recall: np.array of shape [n] consisting of max recall for all classes
+      where the values are 0.0 if objects are found.
+  """
+  # The method for computing precision-recall inserts precision = 0.0
+  # when a particular recall value has not been achieved. The maximum
+  # recall value is therefore the highest recall value when the associated
+  # precision > 0.
+  assert len(precision_recall.shape) == 3, 'Invalid precision recall curve.'
+  assert precision_recall.shape[-1] == 2, 'Invalid precision recall curve.'
+  num_classes = precision_recall.shape[0]
+
+  max_recall = np.zeros(shape=(num_classes), dtype=np.float32)
+
+  valid_precisions = precision_recall[:, :, 0] > 0.0
+  for i in range(num_classes):
+    valid_precisions_indices = valid_precisions[i, :]
+    if np.any(valid_precisions_indices):
+      max_recall[i] = np.max(precision_recall[i, valid_precisions_indices, 1])
+  return max_recall
+
+
 class BreakdownMetric(object):
   """Base class for calculating precision recall conditioned on a variate."""
 
@@ -226,39 +290,39 @@ class ByDistance(BreakdownMetric):
     self._AccumulateHistogram(statistics=distances, labels=result.labels)
 
   def ComputeMetrics(self, compute_metrics_fn):
-    tf.logging.info('Calculating AP by distance: start')
+    tf.logging.info('Calculating by distance: start')
     p = self.params
     for d in range(self.NumBinsOfHistogram()):
       value_at_histogram = (
           d * p.metadata.DistanceBinWidth() +
           p.metadata.DistanceBinWidth() / 2.0)
-      metrics = compute_metrics_fn(distance=d)
-      scalars = metrics['scalars']
-      self._average_precisions[d] = [s['ap'] for s in scalars]
       self._values[d] = value_at_histogram
-    assert len(self._values) == len(list(self._average_precisions.keys()))
-    tf.logging.info('Calculating AP by distance: finished')
+
+      metrics = compute_metrics_fn(distance=d)
+      curves = metrics['curves']
+      self._precision_recall[d] = np.array([c['pr'] for c in curves])
+    assert len(self._values) == len(list(self._precision_recall.keys()))
+    tf.logging.info('Calculating by distance: finished')
 
   def GenerateSummaries(self, name):
     """Generate an image summary for AP versus distance by class."""
-    num_distances = self._values.shape[0]
     p = self.params
+
+    legend_names = []
+    for j in p.metadata.EvalClassIndices():
+      legend_names.append(p.metadata.ClassNames()[j])
+
+    num_distances = self._values.shape[0]
     ys = np.zeros(
         shape=(num_distances, len(p.metadata.EvalClassIndices())),
         dtype=np.float32)
 
-    legend_names = []
-    for i, j in enumerate(p.metadata.EvalClassIndices()):
-      legend_names.append(p.metadata.ClassNames()[j])
-      for distance in self._average_precisions:
-        v = self._average_precisions[distance][i]
-        if np.isnan(v):
-          v = 0.0
-        ys[distance, i] = v
+    for dist in self._precision_recall:
+      ys[dist, :] = _FindMaximumRecall(self._precision_recall[dist])
 
     def _Setter(fig, axes):
       """Configure the plot for mAP versus distance."""
-      axes.grid(b=False)
+      axes.grid(b=True)
       fontsize = 14
       for i, j in enumerate(p.metadata.EvalClassIndices()):
         for d, x in enumerate(self._values):
@@ -274,13 +338,13 @@ class ByDistance(BreakdownMetric):
               0.0,
               p.metadata.MaximumDistance() + p.metadata.DistanceBinWidth(),
               p.metadata.DistanceBinWidth()))
-      axes.set_ylabel('average precision (AP)', fontsize=fontsize)
-      axes.set_ylim([-0.02, 1.05])
+      axes.set_ylabel('maximum recall', fontsize=fontsize)
+      axes.set_ylim([-0.01, 1.05])
       axes.set_yticks(np.arange(0.0, 1.05, 0.1))
       axes.legend([name.lower() for name in legend_names], numpoints=1, loc=3)
       fig.tight_layout()
 
-    tag_str = '{}/AP_by_distance'.format(name)
+    tag_str = '{}/recall_by_distance'.format(name)
     image_summary = plot.Curve(
         name=tag_str,
         figsize=(10, 8),
@@ -334,7 +398,7 @@ class ByNumPoints(BreakdownMetric):
         statistics=result.num_points, labels=result.labels)
 
   def ComputeMetrics(self, compute_metrics_fn):
-    tf.logging.info('Calculating max recall by number of points: start')
+    tf.logging.info('Calculating by number of points: start')
     # Note that we skip the last edge as the number of edges is one greater
     # then the number of bins.
     self._values = self._LogSpacedBinEdgesofPoints()[:-1]
@@ -343,38 +407,24 @@ class ByNumPoints(BreakdownMetric):
       curves = metrics['curves']
       self._precision_recall[n] = np.array([c['pr'] for c in curves])
     assert len(self._values) == len(list(self._precision_recall.keys()))
-    tf.logging.info('Calculating max recall by number of points: finished')
+    tf.logging.info('Calculating by number of points: finished')
 
   def GenerateSummaries(self, name):
     """Generate an image summary for max recall by number of points by class."""
     image_summaries = self._GenerateCumulativeSummaries(name)
     p = self.params
 
+    legend_names = []
+    for j in p.metadata.EvalClassIndices():
+      legend_names.append(p.metadata.ClassNames()[j])
+
     num_points_bins = self._values.shape[0]
     ys = np.zeros(
         shape=(num_points_bins, len(p.metadata.EvalClassIndices())),
         dtype=np.float32)
 
-    # The method for computing precision-recall inserts precision = 0.0
-    # when a particular recall value has not been achieved. The maximum
-    # recall value is therefore the highest recall value when the associated
-    # precision > 0.
-    valid_precisions = {}
     for num_points in self._precision_recall:
-      valid_precisions[num_points] = (
-          self._precision_recall[num_points][:, :, 0] > 0.0)
-
-    legend_names = []
-    for i, j in enumerate(p.metadata.EvalClassIndices()):
-      legend_names.append(p.metadata.ClassNames()[j])
-      for num_points in self._precision_recall:
-        valid_precisions_indices = valid_precisions[num_points][i]
-        if not np.any(valid_precisions_indices):
-          v = 0.0
-        else:
-          v = np.max(self._precision_recall[num_points]
-                     [i, valid_precisions_indices, 1])
-        ys[num_points, i] = v
+      ys[num_points, :] = _FindMaximumRecall(self._precision_recall[num_points])
 
     def _Setter(fig, axes):
       """Configure the plot for max recall versus number of points."""
@@ -531,7 +581,7 @@ class ByRotation(BreakdownMetric):
     self._AccumulateHistogram(statistics=rotations, labels=result.labels)
 
   def ComputeMetrics(self, compute_metrics_fn):
-    tf.logging.info('Calculating AP by rotation: start')
+    tf.logging.info('Calculating by rotation: start')
     p = self.params
     self._values = np.zeros(
         shape=(self.NumBinsOfHistogram(), 1), dtype=np.float32)
@@ -540,44 +590,39 @@ class ByRotation(BreakdownMetric):
     for r in range(self.NumBinsOfHistogram()):
       # Calculate the center of the histogram bin.
       value_at_histogram = r * bin_width + bin_width / 2.0
-      metrics = compute_metrics_fn(rotation=r)
-      scalars = metrics['scalars']
-      self._average_precisions[r] = [s['ap'] for s in scalars]
       self._values[r] = value_at_histogram
-    assert len(self._values) == len(list(self._average_precisions.keys()))
-    tf.logging.info('Calculating AP by rotation: finished')
+      metrics = compute_metrics_fn(rotation=r)
+      curves = metrics['curves']
+      self._precision_recall[r] = np.array([c['pr'] for c in curves])
+    assert len(self._values) == len(list(self._precision_recall.keys()))
+    tf.logging.info('Calculating by rotation: finished')
 
   def GenerateSummaries(self, name):
     """Generate an image summary for AP versus rotation by class."""
-    num_rotations = self._values.shape[0]
     p = self.params
+    legend_names = []
+    for j in p.metadata.EvalClassIndices():
+      legend_names.append(p.metadata.ClassNames()[j])
+
+    num_rotations = self._values.shape[0]
     rotation_in_degrees = self._values * 180.0 / np.pi
     ys = np.zeros(
         shape=(num_rotations, len(p.metadata.EvalClassIndices())),
         dtype=np.float32)
 
-    legend_names = []
-    for i, j in enumerate(p.metadata.EvalClassIndices()):
-      legend_names.append(p.metadata.ClassNames()[j])
-      for rotation in self._average_precisions:
-        v = self._average_precisions[rotation][i]
-        if np.isnan(v):
-          v = 0.0
-        ys[rotation, i] = v
+    for rotation in self._precision_recall:
+      ys[rotation, :] = _FindMaximumRecall(self._precision_recall[rotation])
 
     def _Setter(fig, axes):
-      """Configure the plot for mAP versus distance."""
-      axes.grid(b=False)
+      """Configure the plot for max recall versus distance."""
+      axes.grid(b=True)
       fontsize = 14
       for i, j in enumerate(p.metadata.EvalClassIndices()):
         for r, x in enumerate(rotation_in_degrees):
           h = self._histogram[r][j]
           y = min(ys[r][i] + 0.03, 1.0)
-          # TODO(shlens): Only display car currently for visual clarity
-          # but relax this soon.
-          if h > 0 and p.metadata.ClassNames()[j] in ['Car', 'Vehicle']:
-            text_label = '{} {}s'.format(h, legend_names[i].lower()[:3])
-            axes.text(x, y, text_label, fontdict={'fontsize': fontsize - 2})
+          text_label = '{} {}s'.format(h, legend_names[i].lower()[:3])
+          axes.text(x, y, text_label, fontdict={'fontsize': fontsize - 2})
 
       axes.set_xlabel('rotation (degrees)', fontsize=fontsize)
       bin_width = (
@@ -586,8 +631,8 @@ class ByRotation(BreakdownMetric):
           np.arange(0.0,
                     p.metadata.MaximumRotation() + bin_width, bin_width) *
           180.0 / np.pi)
-      axes.set_ylabel('average precision (AP)', fontsize=fontsize)
-      axes.set_ylim([-0.02, 1.05])
+      axes.set_ylabel('maximum recall', fontsize=fontsize)
+      axes.set_ylim([-0.01, 1.05])
       axes.set_yticks(np.arange(0.0, 1.05, 0.1))
       axes.set_xlim([0.0, 180.0])
       axes.legend([name.lower() for name in legend_names],
@@ -595,7 +640,7 @@ class ByRotation(BreakdownMetric):
                   loc='upper right')
       fig.tight_layout()
 
-    tag_str = '{}/AP_by_rotation'.format(name)
+    tag_str = '{}/recall_by_rotation'.format(name)
     image_summary = plot.Curve(
         name=tag_str,
         figsize=(10, 8),
@@ -632,7 +677,7 @@ class ByDifficulty(BreakdownMetric):
 
   def ComputeMetrics(self, compute_metrics_fn):
     p = self.params
-    tf.logging.info('Calculating AP by difficulty: start')
+    tf.logging.info('Calculating by difficulty: start')
     for difficulty in self.params.metadata.DifficultyLevels():
       metrics = compute_metrics_fn(difficulty=difficulty)
       scalars = metrics['scalars']
@@ -647,7 +692,7 @@ class ByDifficulty(BreakdownMetric):
       if difficulty in self._calibration:
         self._calibration[difficulty].Calculate(metrics)
 
-    tf.logging.info('Calculating AP by difficulty: finished')
+    tf.logging.info('Calculating by difficulty: finished')
 
   def GenerateSummaries(self, name):
     """Generate an image summary for PR by difficulty and for calibration.
@@ -667,7 +712,7 @@ class ByDifficulty(BreakdownMetric):
         num_objects = self._histogram[i][class_id]
         legend[class_id].append('%s (%d)' % (difficulty, num_objects))
 
-    image_summaries = []
+    summaries = []
     for i, j in enumerate(p.metadata.EvalClassIndices()):
 
       def _PRSetter(fig, axes):
@@ -678,7 +723,9 @@ class ByDifficulty(BreakdownMetric):
         axes.set_xticks(ticks)
         axes.set_ylabel('Precision')
         axes.set_yticks(ticks)
+        # pylint: disable=undefined-loop-variable
         axes.legend(legend[j], numpoints=1)  # pylint: disable=cell-var-from-loop
+        # pylint: enable=undefined-loop-variable
         fig.tight_layout()
 
       classname = p.metadata.ClassNames()[j]
@@ -700,12 +747,35 @@ class ByDifficulty(BreakdownMetric):
           linestyle='-',
           linewidth=2,
           alpha=0.5)
-      image_summaries.append(image_summary)
+      summaries.append(image_summary)
 
     for difficulty, c in self._calibration.items():
       # Note that we only generate a calibration for a single difficulty level.
       calibration_summaries = c.Summary(name)
       for calibration_summary in calibration_summaries:
-        image_summaries.append(calibration_summary)
+        summaries.append(calibration_summary)
 
-    return image_summaries
+    # Generate scalar summaries for the various recalls for each difficulty.
+    for difficulty in p.metadata.DifficultyLevels():
+      max_recall = _FindMaximumRecall(self._precision_recall[difficulty])
+      for i, j in enumerate(p.metadata.EvalClassIndices()):
+        summary = tf.Summary(value=[
+            tf.Summary.Value(
+                tag='{}/{}/max_recall_{}'.format(name, classname, difficulty),
+                simple_value=max_recall[i])
+        ])
+        summaries.append(summary)
+
+      for precision_level in p.metadata.RecallAtPrecision():
+        recall_at_precision = _FindRecallAtGivenPrecision(
+            self._precision_recall[difficulty], precision_level)
+        for i, j in enumerate(p.metadata.EvalClassIndices()):
+          classname = p.metadata.ClassNames()[j]
+          summary = tf.Summary(value=[
+              tf.Summary.Value(
+                  tag='{}/{}/recall_{}_{}'.format(
+                      name, classname, int(precision_level * 100), difficulty),
+                  simple_value=recall_at_precision[i])
+          ])
+        summaries.append(summary)
+    return summaries

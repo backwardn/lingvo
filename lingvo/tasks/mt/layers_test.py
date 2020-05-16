@@ -57,7 +57,7 @@ class LayersTest(test_utils.TestCase):
     # time = 2,
     batch = 3
     tf.flags.FLAGS.tpu_compatible = True
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       params = self._TransformerParams(layer=layer)
       params.dtype = dtype
       params.fprop_dtype = fprop_dtype
@@ -74,8 +74,8 @@ class LayersTest(test_utils.TestCase):
 
       output, _, _ = xformer.FProp(xformer.theta, inputs, paddings)
 
-      tf.global_variables_initializer().run()
-      output = sess.run(output)
+      self.evaluate(tf.global_variables_initializer())
+      output = self.evaluate(output)
 
       self.assertAllCloseAccordingToType(
           [[[2.761079, -3.756719]] * batch, [[-2.623049, 3.3679538]] * batch],
@@ -88,7 +88,7 @@ class LayersTest(test_utils.TestCase):
   def testTransformerStackAlternateLayers(self):
     batch = 3
     tf.flags.FLAGS.tpu_compatible = True
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       model_dim = 2
       num_transformer_layers = 2
       transformer_tpl = layers_with_attention.TransformerLayer.Params()
@@ -116,8 +116,8 @@ class LayersTest(test_utils.TestCase):
           paddings_arr.tolist(), dtype=py_utils.FPropDtype(params))
       output, _, _ = xformer.FProp(xformer.theta, inputs, paddings)
 
-      tf.global_variables_initializer().run()
-      output = sess.run(output)
+      self.evaluate(tf.global_variables_initializer())
+      output = self.evaluate(output)
       print(repr(output))
       self.assertAllCloseAccordingToType(
           np.array([[[-0.940543, 1.479253]] * batch,
@@ -125,7 +125,7 @@ class LayersTest(test_utils.TestCase):
 
   def testTransformerStackFPropWithPackedInputs(self):
     # batch = 2. time = 2, depth = 2
-    with self.session(use_gpu=True) as sess:
+    with self.session(use_gpu=True):
       with tf.variable_scope('packing_test', reuse=tf.AUTO_REUSE):
         params = self._TransformerParams()
         xformer = mt_layers.TransformerStack(params)
@@ -150,14 +150,14 @@ class LayersTest(test_utils.TestCase):
             xformer_packed.theta, inputs_packed, paddings_packed, seg_id)
         output_packed = tf.reshape(output_packed, tf.shape(output))
 
-        tf.global_variables_initializer().run()
-        output, output_packed = sess.run([output, output_packed])
+        self.evaluate(tf.global_variables_initializer())
+        output, output_packed = self.evaluate([output, output_packed])
 
         self.assertAllClose(output_packed, output)
 
   def testTransparentTransformerStackTrainFProp(self):
     # time = 2, batch = 1
-    with self.session(use_gpu=True) as sess:
+    with self.session(use_gpu=True):
       params = self._TransformerParams()
       params.is_transparent = True
       params.num_transparent_outputs = 2
@@ -170,9 +170,9 @@ class LayersTest(test_utils.TestCase):
       inputs = tf.constant(input_arr.tolist(), dtype=tf.float32)
       paddings = tf.constant(paddings_arr.tolist(), dtype=tf.float32)
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       outputs, _, _ = xformer.FPropDefaultTheta(inputs, paddings)
-      out_1, out_2 = sess.run(outputs)
+      out_1, out_2 = self.evaluate(outputs)
       self.assertAllClose([[[1.38054, -1.37836]], [[-0.811525, 1.183977]]],
                           out_1)
       self.assertAllClose([[[1.38054, -1.37836]], [[-0.811525, 1.183977]]],
@@ -180,7 +180,7 @@ class LayersTest(test_utils.TestCase):
 
   def testTransparentTransformerStackEvalFProp(self):
     # time = 2, batch = 1
-    with self.session(use_gpu=True) as sess, self.SetEval(True):
+    with self.session(use_gpu=True), self.SetEval(True):
       params = self._TransformerParams()
       params.is_transparent = True
       params.num_transparent_outputs = 2
@@ -193,9 +193,9 @@ class LayersTest(test_utils.TestCase):
       inputs = tf.constant(input_arr.tolist(), dtype=tf.float32)
       paddings = tf.constant(paddings_arr.tolist(), dtype=tf.float32)
 
-      tf.global_variables_initializer().run()
+      self.evaluate(tf.global_variables_initializer())
       outputs, _, _ = xformer.FPropDefaultTheta(inputs, paddings)
-      out = sess.run(outputs)
+      out = self.evaluate(outputs)
       self.assertAllClose([[[1.38054, -1.37836]], [[-0.811525, 1.183977]]],
                           out[:, :, :, 0])
       self.assertAllClose([[[1.38054, -1.37836]], [[-0.811525, 1.183977]]],
@@ -277,9 +277,9 @@ class LayersTest(test_utils.TestCase):
         query_vec, aux_paddings, aux_vecs)
 
     expected_ctx, expected_probs = self._ExpectedSingleSourceResults()
-    with self.session(use_gpu=True) as sess:
-      tf.global_variables_initializer().run()
-      actual_ctx_ref, actual_probs_ref = sess.run([ctx_ref, probs_ref])
+    with self.session(use_gpu=True):
+      self.evaluate(tf.global_variables_initializer())
+      actual_ctx_ref, actual_probs_ref = self.evaluate([ctx_ref, probs_ref])
       tf.logging.info(np.array_repr(actual_ctx_ref))
       tf.logging.info(np.array_repr(actual_probs_ref))
       self.assertAllClose(expected_ctx, actual_ctx_ref)
@@ -292,7 +292,7 @@ class LayersTest(test_utils.TestCase):
     fprop_dtype = tf.float32
     layer = mt_layers.TransformerStack
     tf.flags.FLAGS.tpu_compatible = True
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       params = self._ContextualTransformerParams(layer=layer)
       params.dtype = dtype
       params.fprop_dtype = fprop_dtype
@@ -325,8 +325,8 @@ class LayersTest(test_utils.TestCase):
           aux_vecs=context,
           aux_paddings=context_paddings)
 
-      tf.global_variables_initializer().run()
-      output = sess.run(output)
+      self.evaluate(tf.global_variables_initializer())
+      output = self.evaluate(output)
       self.assertAllCloseAccordingToType(
           [[[-2.622666, 3.367474]] * batch, [[2.719156, -3.707336]] * batch],
           output)
@@ -337,7 +337,7 @@ class LayersTest(test_utils.TestCase):
     fprop_dtype = tf.float32
     layer = mt_layers.TransformerStack
     tf.flags.FLAGS.tpu_compatible = True
-    with self.session(use_gpu=False) as sess:
+    with self.session(use_gpu=False):
       params = self._MaskedTransformerParams(layer=layer)
       params.dtype = dtype
       params.fprop_dtype = fprop_dtype
@@ -355,8 +355,8 @@ class LayersTest(test_utils.TestCase):
 
       output, _, _ = xformer.FProp(xformer.theta, inputs, paddings)
 
-      tf.global_variables_initializer().run()
-      output = sess.run(output)
+      self.evaluate(tf.global_variables_initializer())
+      output = self.evaluate(output)
       self.assertAllClose(
           [[[2.761103, -3.756748]] * batch, [[-2.623049, 3.367954]] * batch],
           output)

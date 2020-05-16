@@ -72,8 +72,6 @@ If = functional_ops.If
 InplaceUpdate = inplace_ops.alias_inplace_update
 Empty = inplace_ops.empty
 EmptyLike = inplace_ops.empty_like
-GetExtraInputs = _function_lib.get_extra_inputs
-GetExtraArgs = _function_lib.get_extra_args
 
 # pylint: disable=undefined-variable, used-before-assignment
 # Move this V2 symbol here to avoid being overwritten by its following V1
@@ -137,6 +135,7 @@ graph_util.extract_sub_graph = tf1.graph_util.extract_sub_graph
 GraphDef = tf1.GraphDef
 GraphKeys = tf1.GraphKeys
 GraphOptions = tf1.GraphOptions
+group = tf1.group
 image.resize_bilinear = tf1.image.resize_bilinear
 image.resize_images = tf1.image.resize_images
 image.resize_nearest_neighbor = tf1.image.resize_nearest_neighbor
@@ -238,9 +237,4 @@ data.make_one_shot_iterator = dataset_ops.make_one_shot_iterator
 # the API, and uses 'partition_strategy="div"' by default;
 # while v1 uses 'partition_strategy="mod"' by default. Keep this for now.
 nn.embedding_lookup = embedding_ops.embedding_lookup
-
-# TF 2.x symbols.
-# Please keep this list short by using TF 2.x API in-place in the codebase.
-to_int32 = lambda x, name="ToInt32": cast(x, dtype=dtypes.int32, name=name)
-to_int64 = lambda x, name="ToInt64": cast(x, dtype=dtypes.int64, name=name)
 # pylint: enable=undefined-variable

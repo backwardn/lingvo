@@ -64,3 +64,7 @@ static_map_int_string = gen_x_ops.static_map_int_string
 
 get_preconditioners = gen_x_ops.get_preconditioners
 compute_preconditioners = gen_x_ops.compute_preconditioners
+
+pack_sequences = gen_x_ops.pack_sequences
+apply_packing = gen_x_ops.apply_packing
+mass = gen_x_ops.mass
