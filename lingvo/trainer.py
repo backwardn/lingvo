@@ -572,6 +572,9 @@ class TrainerTpu(base_runner.BaseRunner):
     with self._graph.as_default(), tf.container(self._container_id):
       with self._cluster, tf.device(self._cluster.job_spec.name):
         self._eval_metrics = metrics.TpuEvalMetrics()
+        # Needed due to the AddExtraTheta() reference to global_Step when
+        # instantiating the InputGenerator.
+        _ = py_utils.GetOrCreateGlobalStepVar()
         input_params = self._cluster.PlaceInput(self.params.input)
         self._input = input_params.Instantiate()
         self._input.CreateTpuEnqueueOps()
@@ -1673,10 +1676,10 @@ class RunnerManager(object):
         FLAGS.job = 'controller,trainer_client'
 
     FLAGS.task = 0
+    local_job = '/job:localhost'
+    FLAGS.controller_job = local_job
 
-    FLAGS.controller_job = '/job:local'
-
-    FLAGS.worker_job = '/job:local'
+    FLAGS.worker_job = local_job
     FLAGS.worker_replicas = 1
     if FLAGS.run_locally == 'gpu':
       if not FLAGS.worker_gpus:
@@ -1692,21 +1695,21 @@ class RunnerManager(object):
     if not FLAGS.worker_split_size:
       FLAGS.worker_split_size = 1
 
-    FLAGS.ps_job = '/job:local'
+    FLAGS.ps_job = local_job
     FLAGS.ps_replicas = 1
     FLAGS.ps_gpus = 0
 
-    FLAGS.input_job = '/job:local'
+    FLAGS.input_job = local_job
     FLAGS.input_replicas = 0
 
-    FLAGS.evaler_job = '/job:local'
+    FLAGS.evaler_job = local_job
     FLAGS.evaler_replicas = 1
     if FLAGS.run_locally == 'gpu':
       FLAGS.evaler_gpus = 1
     else:
       FLAGS.evaler_gpus = 0
 
-    FLAGS.decoder_job = '/job:local'
+    FLAGS.decoder_job = local_job
     FLAGS.decoder_replicas = 1
     if FLAGS.run_locally == 'gpu':
       FLAGS.decoder_gpus = 1
