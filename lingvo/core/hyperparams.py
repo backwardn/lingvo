@@ -169,25 +169,123 @@ class _Param(object):
     return self._value
 
 
-def CopyParamsTo(from_p, to_p, skip=None):
-  """Copy from one Params to another, with optional skipped params.
+def CopyFieldsTo(from_p, to_p, skip=None):
+  """Copy fields from one Params to another, with optional skipped params.
+
+  Preserves `type(to_p.Instantiate())`. Use `from_p.Copy()` instead if requiring
+  a deep copy of `from_p`, without updating `to_p`.
 
   Args:
     from_p: Source params to copy from.
     to_p: Destination params to copy to.
-    skip: If not None, a list of strings of param names to skip.
+    skip: If not None, a list of strings of param names to skip. Automatically
+      skips InstantiableParams' 'cls' parameter.
 
   Returns:
     None
   """
+  skip = skip or []
+  skip.append('cls')
   for n, p in from_p.IterParams():
-    if skip and n in skip:
+    if n in skip:
       continue
     if isinstance(p, Params):
       to_p.Set(**{n: p.Copy()})
     else:
       to_p.Set(**{n: p})
   return to_p
+
+
+def DefineParamsFromArgs(func, params, ignore=None):
+  """Defines params for each parameter of func.
+
+  This allows you to define the parameters necessary to call a function
+  or instantiate a class without having to type the Define statements yourself.
+  Default values for the function parameters will be copied into the params
+  object as well.
+
+  To use this with a class constructor, use MyClass.__init__ as the func
+  parameter.
+
+  Args:
+    func: A function or method. Parameters for this function will be
+    params: A hyperparams object. New parameters will be defined here.
+    ignore: Don't define parameters in the params object for these function
+      parameters.
+  """
+  # Get the call signature of the function.
+  init_signature = inspect.signature(func)
+  for parameter in init_signature.parameters.values():
+    if parameter.name in ['self', 'args', 'kwargs']:
+      continue
+    if ignore and parameter.name in ignore:
+      continue
+    # Add each parameter of the constructor to the params object.
+    # If the parameter has a default, add that too.
+    params.Define(parameter.name, parameter.default, 'Function parameter.')
+
+
+def _ExtractCallParams(func, params, **kwargs):
+  """Extracts parameters from params that should be used to call func.
+
+  Args:
+    func: A function, constructor, or method.
+    params: A hyperparams object containing arguments for func.
+    **kwargs: Argument/value pairs that should override params.
+
+  Returns:
+    A dict containing function parameters.
+  """
+  # Read the list of parameters that func requires.
+  init_signature = inspect.signature(func)
+  func_params = {}
+  for parameter in init_signature.parameters.values():
+    key = parameter.name
+    # Anything in kwargs overrides parameters.
+    if key in kwargs:
+      func_params[key] = kwargs[key]
+      continue
+    # If there's something in the function signature that's not in params,
+    # skip it.
+    if key not in params:
+      continue
+    # These are special function parameters that we should skip.
+    if key in ['self', 'args', 'kwargs']:
+      continue
+    # If the value in params is the same as the function default, we will
+    # let the function signature fill in this parameter for us.
+    if init_signature.parameters[key].default == params.Get(key):
+      continue
+    func_params[key] = params.Get(key)
+  return func_params
+
+
+def CallWithParams(func, params, **kwargs):
+  """Call a function or method with a hyperparams object.
+
+  Args:
+    func: A function or method.
+    params: A hyperparams object with parameters to pass to func.
+    **kwargs: Argument/value pairs that should override params.
+
+  Returns:
+    The return values from func.
+  """
+  return func(**_ExtractCallParams(func, params, **kwargs))
+
+
+def ConstructWithParams(class_type, params, **kwargs):
+  """Construct and object with a hyperparams object.
+
+  Args:
+    class_type: A class type.
+    params: A hyperparams object with parameters to pass to the constructor.
+    **kwargs: Argument/value pairs that should override params.
+
+  Returns:
+    The constructed object.
+  """
+  return class_type(**_ExtractCallParams(class_type.__init__, params, **kwargs))
 
 
 class Params(object):
@@ -281,6 +379,7 @@ class Params(object):
     return name
 
   def Copy(self):
+    """Creates a deep copy of self."""
     return self._CopyTo(type(self)())
 
   def _CopyTo(self, res):
@@ -497,6 +596,7 @@ class Params(object):
 
     return _ToParam(self)
 
+  # TODO(tonybruguier): Move to module-level function (cls is never used).
   @classmethod
   def FromProto(cls, param_pb):
     """Reads from a Hyperparams proto."""
@@ -560,7 +660,7 @@ class Params(object):
     def _FromParam(param_pb):
       """Deserializes Hyperparam proto."""
 
-      params = InstantiableParams()
+      params = InstantiableParams() if 'cls' in param_pb.items else Params()
       for k in param_pb.items:
         val = _FromParamValue(param_pb.items[k])
         if k == 'cls':
@@ -848,4 +948,5 @@ class InstantiableParams(Params):
     return self.cls(self)
 
   def Copy(self):
+    """See base class."""
     return self._CopyTo(type(self)(self.cls))
