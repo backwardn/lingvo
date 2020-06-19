@@ -357,6 +357,23 @@ class BaseConv2DLayer(quant_utils.QuantizableLayer):
 
     # TODO(yonghui): implement the variational noise logic.
 
+  def _CreateChildrenVariables(self, skip=None):
+    skip = skip or []
+    # HACK: Backwards compatibility -- bn needs to be created
+    # outside of tf.variable_scope(p.name).
+    if self.params.batch_norm:
+      skip.append(self.bn)
+    super(BaseConv2DLayer, self)._CreateChildrenVariables(skip)
+
+  # HACK: Backwards compatibility -- bn needs to be created
+  # outside of tf.variable_scope(p.name).
+  def CreateVariables(self):
+    if self._create_variables_called:
+      return
+    if self.params.batch_norm:
+      self.bn.CreateVariables()
+    super(BaseConv2DLayer, self).CreateVariables()
+
   @property
   def output_channels(self):
     """The number of output channels for this conv layer."""
@@ -925,6 +942,33 @@ class ProjectionLayer(quant_utils.QuantizableLayer):
     if self._is_bn_folded:
       assert not p.affine_last, (
           'Folded batchnorm is not compatible with affine_last')
+
+    # Determine quantization needs based on whether fusing activation
+    # or not.
+    self._pre_activation_qt_name = None
+    self._output_qt_name = ('activation'
+                            if p.activation != 'NONE' else 'affine_matmul')
+    if (p.activation != 'NONE' and
+        p.activation not in _TFLITE_FUSED_ACTIVATION_NAMES):
+      # Not a fused activation function.
+      # Need a qtensor to track the pre-activation tensor. The name is
+      # compatible with older checkpoints.
+      self._pre_activation_qt_name = 'affine_matmul'
+    self.TrackQTensor(self._output_qt_name)
+    if self._pre_activation_qt_name:
+      self.TrackQTensor(self._pre_activation_qt_name)
+
+    if p.batch_norm:
+      bn_params = p.bn_params.Copy()
+      bn_params.name = p.name
+      bn_params.dim = p.input_dim if p.affine_last else p.output_dim
+
+      self.CreateChild('bn', bn_params)
+    # TODO(yonghui): implement the variational noise logic.
+
+  def _CreateVariables(self):
+    super(ProjectionLayer, self)._CreateVariables()
+    p = self.params
     w_pc = py_utils.WeightParams(
         shape=[p.input_dim, p.output_dim],
         init=p.params_init,
@@ -951,56 +995,32 @@ class ProjectionLayer(quant_utils.QuantizableLayer):
           dtype=p.dtype,
           collections=[self.__class__.__name__ + '_vars'])
 
-    with tf.variable_scope(p.name):
-      weights_var_name = 'w'
-      if p.apply_pruning:
-        mask_var_name = 'mask'
-        threshold_var_name = 'threshold'
-        self.CreateVariable(
-            mask_var_name, mask_w_pc, theta_fn=None, trainable=False)
-        self.CreateVariable(
-            threshold_var_name, threshold_w_pc, theta_fn=None, trainable=False)
+    weights_var_name = 'w'
+    if p.apply_pruning:
+      mask_var_name = 'mask'
+      threshold_var_name = 'threshold'
+      self.CreateVariable(
+          mask_var_name, mask_w_pc, theta_fn=None, trainable=False)
+      self.CreateVariable(
+          threshold_var_name, threshold_w_pc, theta_fn=None, trainable=False)
 
-        def MaskWeightFn(weight):
-          return tf.multiply(
-              self.AddGlobalVN(weight), getattr(self.vars, mask_var_name),
-              'masked_w')
+      def MaskWeightFn(weight):
+        return tf.multiply(
+            self.AddGlobalVN(weight), getattr(self.vars, mask_var_name),
+            'masked_w')
 
-        self.CreateVariable(weights_var_name, w_pc, theta_fn=MaskWeightFn)
-        py_utils.AddToPruningCollections(
-            getattr(self.vars, weights_var_name),
-            getattr(self.vars, mask_var_name),
-            getattr(self.vars, threshold_var_name))
-      else:
-        self.CreateVariable(weights_var_name, w_pc)
+      self.CreateVariable(weights_var_name, w_pc, theta_fn=MaskWeightFn)
+      py_utils.AddToPruningCollections(
+          getattr(self.vars, weights_var_name), getattr(self.vars,
+                                                        mask_var_name),
+          getattr(self.vars, threshold_var_name))
+    else:
+      self.CreateVariable(weights_var_name, w_pc)
 
-      if p.has_bias:
-        self.CreateVariable('b', b_pc)
-      if p.weight_norm:
-        self.CreateVariable('g', g_pc)
-
-    # Determine quantization needs based on whether fusing activation
-    # or not.
-    self._pre_activation_qt_name = None
-    self._output_qt_name = ('activation'
-                            if p.activation != 'NONE' else 'affine_matmul')
-    if (p.activation != 'NONE' and
-        p.activation not in _TFLITE_FUSED_ACTIVATION_NAMES):
-      # Not a fused activation function.
-      # Need a qtensor to track the pre-activation tensor. The name is
-      # compatible with older checkpoints.
-      self._pre_activation_qt_name = 'affine_matmul'
-    self.TrackQTensor(self._output_qt_name)
-    if self._pre_activation_qt_name:
-      self.TrackQTensor(self._pre_activation_qt_name)
-
-    if p.batch_norm:
-      bn_params = p.bn_params.Copy()
-      bn_params.name = p.name
-      bn_params.dim = p.input_dim if p.affine_last else p.output_dim
-
-      self.CreateChild('bn', bn_params)
-    # TODO(yonghui): implement the variational noise logic.
+    if p.has_bias:
+      self.CreateVariable('b', b_pc)
+    if p.weight_norm:
+      self.CreateVariable('g', g_pc)
 
   @classmethod
   def NumOutputNodes(cls, p):
@@ -1874,11 +1894,15 @@ class EmbeddingLayer(base_layer.BaseLayer):
     assert p.name
 
     total_size = p.vocab_size * p.embedding_dim
-    actual_shards = min(
+    self._actual_shards = min(
         p.max_num_shards,
         int(math.ceil(float(total_size) / self.MIN_PARAMS_PER_SHARD)))
-    self._ids_per_shard = int(math.ceil(float(p.vocab_size) / actual_shards))
+    self._ids_per_shard = int(
+        math.ceil(float(p.vocab_size) / self._actual_shards))
 
+  def _CreateVariables(self):
+    super(EmbeddingLayer, self)._CreateVariables()
+    p = self.params
     w_pc = py_utils.WeightParams(
         shape=[self._ids_per_shard, p.embedding_dim],
         init=p.params_init,
@@ -1891,25 +1915,24 @@ class EmbeddingLayer(base_layer.BaseLayer):
     # back to the worker.
     emb_vars = []
     emb_shards = []
-    with tf.variable_scope(p.name):
-      for i in range(actual_shards):
-        var_name = 'var_%d' % i
-        # TODO(b/158490758): remove default_seed=None setting.
-        self.CreateVariable(var_name, w_pc, default_seed=None)
-        emb_vars.append(self.vars[var_name])
-        # NOTE: self.theta[var_name] has transformations such as variational
-        # noise applied via theta_fn in self.CreateVariable. For embedding layer
-        # we apply variational noise explicitly in EmbLookup, so we do not use
-        # self.theta[var_name] here.
-        v = self.vars[var_name]
-        if not p.on_ps:
-          v = tf.identity(v)
-        if p.fprop_dtype is not None and p.fprop_dtype != p.dtype:
-          v = tf.cast(v, p.fprop_dtype)
-        emb_shards.append(v)
-        # Remove from _private_vars / _private_thetas to be added later as wm.
-        del self._private_vars[var_name]
-        del self._private_theta[var_name]
+    for i in range(self._actual_shards):
+      var_name = 'var_%d' % i
+      # TODO(b/158490758): remove default_seed=None setting.
+      self.CreateVariable(var_name, w_pc, default_seed=None)
+      emb_vars.append(self.vars[var_name])
+      # NOTE: self.theta[var_name] has transformations such as variational noise
+      # applied via theta_fn in self.CreateVariable. For embedding layer we
+      # apply variational noise explicitly in EmbLookup, so we do not use
+      # self.theta[var_name] here.
+      v = self.vars[var_name]
+      if not p.on_ps:
+        v = tf.identity(v)
+      if p.fprop_dtype is not None and p.fprop_dtype != p.dtype:
+        v = tf.cast(v, p.fprop_dtype)
+      emb_shards.append(v)
+      # Remove from _private_vars / _private_thetas to be added later as wm.
+      del self._private_vars[var_name]
+      del self._private_theta[var_name]
     self._private_vars['wm'] = emb_vars
     self._private_theta['wm'] = emb_shards
 
@@ -1994,6 +2017,11 @@ class TPUEmbeddingTable(base_layer.BaseLayer):
     self._table_config = tpu_embedding_lib.TableConfig(
         self._padded_vocab_size, p.embedding_dim, combiner=p.combiner)
 
+    self._load_op_list = []
+    self._retrieve_op_list = []
+
+  def _CreateVariables(self):
+    p = self.params
     w_pc = py_utils.WeightParams(
         shape=[self._ids_per_shard, p.embedding_dim],
         init=p.params_init,
@@ -2006,54 +2034,50 @@ class TPUEmbeddingTable(base_layer.BaseLayer):
         collections=[self.__class__.__name__ + '_vars'])
 
     embedding_table_vars = []
-    self._load_op_list = []
-    self._retrieve_op_list = []
+    for i in range(p.num_tpu_hosts):
+      if self.do_eval:
+        device_name = None
+      else:
+        device_name = '{}/replica:0/task:{}/device:CPU:0'.format(
+            self.cluster.params.worker.name, i)
 
-    with tf.variable_scope(p.name):
-      for i in range(p.num_tpu_hosts):
+      with tf.device(device_name), py_utils.outside_all_rewrites():
+        var_name = 'var_%d' % i
+        self.CreateVariable(var_name, w_pc)
+        embedding_var = self.vars[var_name]
+        embedding_table_vars.append(embedding_var)
+        # Remove from _private_vars / _private_thetas to be added later as wm.
+        del self._private_vars[var_name]
+        del self._private_theta[var_name]
+
+        # Only trainer and controller needs the slot variables.
         if self.do_eval:
-          device_name = None
-        else:
-          device_name = '{}/replica:0/task:{}/device:CPU:0'.format(
-              self.cluster.params.worker.name, i)
+          continue
+        self.CreateVariable('%s/Adagrad' % var_name, w_ada, trainable=False)
+        accumulator_var = self.vars['%s/Adagrad' % var_name]
 
-        with tf.device(device_name), py_utils.outside_all_rewrites():
-          var_name = 'var_%d' % i
-          self.CreateVariable(var_name, w_pc)
-          embedding_var = self.vars[var_name]
-          embedding_table_vars.append(embedding_var)
-          # Remove from _private_vars / _private_thetas to be added later as wm.
-          del self._private_vars[var_name]
-          del self._private_theta[var_name]
+        # Only the Trainer needs these ops.
+        if py_utils.use_tpu():
+          tf.logging.info('creating load and retrieve ops.')
+          load_parameters_op = (
+              tpu_embedding_lib.tpu_ops.load_tpu_embedding_adagrad_parameters(
+                  parameters=embedding_var,
+                  accumulators=accumulator_var,
+                  table_name=self._table_name,
+                  num_shards=p.num_tpu_hosts,
+                  shard_id=i))
+          self._load_op_list.append(load_parameters_op)
 
-          # Only trainer and controller needs the slot variables.
-          if self.do_eval:
-            continue
-          self.CreateVariable('%s/Adagrad' % var_name, w_ada, trainable=False)
-          accumulator_var = self.vars['%s/Adagrad' % var_name]
-
-          # Only the Trainer needs these ops.
-          if py_utils.use_tpu():
-            tf.logging.info('creating load and retrieve ops.')
-            load_parameters_op = (
-                tpu_embedding_lib.tpu_ops.load_tpu_embedding_adagrad_parameters(
-                    parameters=embedding_var,
-                    accumulators=accumulator_var,
-                    table_name=self._table_name,
-                    num_shards=p.num_tpu_hosts,
-                    shard_id=i))
-            self._load_op_list.append(load_parameters_op)
-
-            retrieved_table, retrieved_accumulator = (
-                tpu_embedding_lib.tpu_ops
-                .retrieve_tpu_embedding_adagrad_parameters(
-                    table_name=self._table_name,
-                    num_shards=p.num_tpu_hosts,
-                    shard_id=i))
-            retrieve_parameters_op = tpu_embedding_lib.control_flow_ops.group(
-                tf.assign(embedding_var, retrieved_table),
-                tf.assign(accumulator_var, retrieved_accumulator))
-            self._retrieve_op_list.append(retrieve_parameters_op)
+          retrieved_table, retrieved_accumulator = (
+              tpu_embedding_lib.tpu_ops
+              .retrieve_tpu_embedding_adagrad_parameters(
+                  table_name=self._table_name,
+                  num_shards=p.num_tpu_hosts,
+                  shard_id=i))
+          retrieve_parameters_op = tpu_embedding_lib.control_flow_ops.group(
+              tf.assign(embedding_var, retrieved_table),
+              tf.assign(accumulator_var, retrieved_accumulator))
+          self._retrieve_op_list.append(retrieve_parameters_op)
 
     self._private_vars['wm'] = embedding_table_vars
     self._private_theta['wm'] = [tf.identity(v) for v in embedding_table_vars]
@@ -2172,6 +2196,14 @@ class TPUEmbeddingLayer(base_layer.BaseLayer):
     assert np.all([t.num_tpu_hosts == num_tpu_hosts for t in p.tables])
 
     self.CreateChildren('tables', p.tables)
+
+  def _CreateVariablesScope(self):
+    # For backwards compatibility: no variable scope.
+    return tf.variable_scope(tf.get_variable_scope())
+
+  def _CreateVariables(self):
+    super(TPUEmbeddingLayer, self)._CreateVariables()
+
     load_op_list = []
     retrieve_op_list = []
 
@@ -2196,10 +2228,10 @@ class TPUEmbeddingLayer(base_layer.BaseLayer):
               table.table_name, max_sequence_length=table.max_sequence_length)
       mode = tpu_embedding_lib.TRAINING
       optimization_parameters = tpu_embedding_lib.AdagradParameters(
-          p.learning_rate, initial_accumulator)
+          self.params.learning_rate, self.params.tables[0].initial_accumulator)
       device_config = tpu_embedding_lib.DeviceConfig(
           num_cores=num_cores,
-          num_hosts=num_tpu_hosts,
+          num_hosts=self.params.tables[0].num_tpu_hosts,
           job_name=self.cluster.params.worker.name)
       self._tpu_embedding = tpu_embedding_lib.TPUEmbedding(
           table_to_config_dict,
@@ -2208,12 +2240,11 @@ class TPUEmbeddingLayer(base_layer.BaseLayer):
           mode,
           master=None,
           optimization_parameters=optimization_parameters,
-          pipeline_execution_with_tensor_core=p
-          .pipeline_execution_with_tensor_core,
+          pipeline_execution_with_tensor_core=(
+              self.params.pipeline_execution_with_tensor_core),
           device_config=device_config)
       tf.add_to_collection(py_utils.TPU_EMBEDDING, self._tpu_embedding)
 
-    if py_utils.use_tpu():
       tf.logging.info('adding load and retrieve ops to collection.')
       tf.add_to_collection(py_utils.TPU_EMBEDDING_LOAD_OPS, load_op_list)
       tf.add_to_collection(py_utils.TPU_EMBEDDING_RETRIEVE_OPS,
@@ -2331,46 +2362,7 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
       self._fprop_mode = 'matmul' if p.use_matmul else 'gather'
     assert self._fprop_mode in valid_fprop_modes, (
         'fprop_mode must be one of %r' % valid_fprop_modes)
-
-    if py_utils.tpu_compat() and self._fprop_mode != 'matmul':
-      if p.use_3d_weight_tensor:
-        assert symbolic.ToStatic(p.embedding_dim) % 128 == 0
-        emb_shape_suf = [symbolic.ToStatic(p.embedding_dim) // 128, 128]
-      else:
-        emb_shape_suf = [symbolic.ToStatic(p.embedding_dim)]
-    else:
-      emb_shape_suf = [symbolic.ToStatic(p.embedding_dim)]
-    weight_shape = [p.vocab_size] + emb_shape_suf
-
-    with tf.variable_scope(p.name):
-      # Define weights
-      pc = py_utils.WeightParams(
-          shape=weight_shape,
-          init=p.params_init,
-          dtype=p.dtype,
-          collections=[self.__class__.__name__ + '_vars'])
-
-      if p.apply_pruning:
-        mask_pc = py_utils.WeightParams(pc.shape,
-                                        py_utils.WeightInit.Constant(1.0),
-                                        p.dtype)
-        threshold_pc = py_utils.WeightParams([],
-                                             py_utils.WeightInit.Constant(0.0),
-                                             tf.float32)
-        self.CreateVariable('mask', mask_pc, theta_fn=None, trainable=False)
-        self.CreateVariable(
-            'threshold', threshold_pc, theta_fn=None, trainable=False)
-
-        def MaskWeightFn(weight):
-          return tf.multiply(
-              self.AddGlobalVN(weight), self.vars.mask, 'masked_weights')
-
-        self.CreateVariable('wm', pc, theta_fn=MaskWeightFn)
-        py_utils.AddToPruningCollections(self.vars.wm, self.vars.mask,
-                                         self.vars.threshold)
-
-      else:
-        self.CreateVariable('wm', pc)
+    emb_shape_suf, weight_shape = self._GetWeightShape()
 
     # flags passed to @tf.Defun
     compiled = py_utils.use_xla()
@@ -2500,6 +2492,52 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
       self._fprop = EmbFprop
     elif self._fprop_mode == 'gather':
       self._fprop = EmbGather
+
+  def _GetWeightShape(self):
+    p = self.params
+    if py_utils.tpu_compat() and self._fprop_mode != 'matmul':
+      if p.use_3d_weight_tensor:
+        assert symbolic.ToStatic(p.embedding_dim) % 128 == 0
+        emb_shape_suf = [symbolic.ToStatic(p.embedding_dim) // 128, 128]
+      else:
+        emb_shape_suf = [symbolic.ToStatic(p.embedding_dim)]
+    else:
+      emb_shape_suf = [symbolic.ToStatic(p.embedding_dim)]
+    weight_shape = [p.vocab_size] + emb_shape_suf
+    return emb_shape_suf, weight_shape
+
+  def _CreateVariables(self):
+    super(SimpleEmbeddingLayer, self)._CreateVariables()
+    p = self.params
+    _, weight_shape = self._GetWeightShape()
+
+    # Define weights
+    pc = py_utils.WeightParams(
+        shape=weight_shape,
+        init=p.params_init,
+        dtype=p.dtype,
+        collections=[self.__class__.__name__ + '_vars'])
+
+    if p.apply_pruning:
+      mask_pc = py_utils.WeightParams(pc.shape,
+                                      py_utils.WeightInit.Constant(1.0),
+                                      p.dtype)
+      threshold_pc = py_utils.WeightParams([],
+                                           py_utils.WeightInit.Constant(0.0),
+                                           tf.float32)
+      self.CreateVariable('mask', mask_pc, theta_fn=None, trainable=False)
+      self.CreateVariable(
+          'threshold', threshold_pc, theta_fn=None, trainable=False)
+
+      def MaskWeightFn(weight):
+        return tf.multiply(
+            self.AddGlobalVN(weight), self.vars.mask, 'masked_weights')
+
+      self.CreateVariable('wm', pc, theta_fn=MaskWeightFn)
+      py_utils.AddToPruningCollections(self.vars.wm, self.vars.mask,
+                                       self.vars.threshold)
+    else:
+      self.CreateVariable('wm', pc)
 
   def EmbLookupDefaultTheta(self, ids):
     """Lookups embedding vectors for ids."""
@@ -2951,6 +2989,13 @@ class SimpleFullSoftmax(SoftmaxLayer):
     assert p.name
     # We shard params across the class dimension.
     assert p.num_classes % p.num_shards == 0
+
+    self.TrackQTensor('inputs', 'logits')
+
+  def _CreateVariables(self):
+    super(SimpleFullSoftmax, self)._CreateVariables()
+    p = self.params
+
     num_classes_per_shard = p.num_classes // p.num_shards
     # When using sampled soft-max we'd rather work with weights of
     # shape=[num_classes_per_shard, p.input_dim] to avoid an expensive transpose
@@ -2960,54 +3005,52 @@ class SimpleFullSoftmax(SoftmaxLayer):
     if p.num_sampled or p.use_num_classes_major_weight:
       self._transpose_weight_params = True
       weights_shard_shape = [num_classes_per_shard, p.input_dim]
-    self.TrackQTensor('inputs', 'logits')
 
-    with tf.variable_scope(p.name):
-      pc = py_utils.WeightParams(
-          shape=weights_shard_shape,
-          init=p.params_init,
-          dtype=p.dtype,
-          collections=[self.__class__.__name__ + '_vars'])
+    pc = py_utils.WeightParams(
+        shape=weights_shard_shape,
+        init=p.params_init,
+        dtype=p.dtype,
+        collections=[self.__class__.__name__ + '_vars'])
 
+    if p.apply_pruning:
+      mask_pc = py_utils.WeightParams(pc.shape,
+                                      py_utils.WeightInit.Constant(1.0),
+                                      p.dtype)
+      threshold_pc = py_utils.WeightParams([],
+                                           py_utils.WeightInit.Constant(0.0),
+                                           tf.float32)
+
+    for i in range(p.num_shards):
+      weights_var_name = 'weight_%d' % i
       if p.apply_pruning:
-        mask_pc = py_utils.WeightParams(pc.shape,
-                                        py_utils.WeightInit.Constant(1.0),
-                                        p.dtype)
-        threshold_pc = py_utils.WeightParams([],
-                                             py_utils.WeightInit.Constant(0.0),
-                                             tf.float32)
+        mask_var_name = 'mask_%d' % i
+        threshold_var_name = 'threshold_%d' % i
+        self.CreateVariable(
+            mask_var_name, mask_pc, theta_fn=None, trainable=False)
+        self.CreateVariable(
+            threshold_var_name, threshold_pc, theta_fn=None, trainable=False)
 
-      for i in range(p.num_shards):
-        weights_var_name = 'weight_%d' % i
-        if p.apply_pruning:
-          mask_var_name = 'mask_%d' % i
-          threshold_var_name = 'threshold_%d' % i
-          self.CreateVariable(
-              mask_var_name, mask_pc, theta_fn=None, trainable=False)
-          self.CreateVariable(
-              threshold_var_name, threshold_pc, theta_fn=None, trainable=False)
+        def MaskWeightFn(weight):
+          return tf.multiply(
+              self.AddGlobalVN(weight), getattr(self.vars, mask_var_name),
+              'masked_weights')
 
-          def MaskWeightFn(weight):
-            return tf.multiply(
-                self.AddGlobalVN(weight), getattr(self.vars, mask_var_name),
-                'masked_weights')
+        self.CreateVariable(weights_var_name, pc, theta_fn=MaskWeightFn)
+        py_utils.AddToPruningCollections(
+            getattr(self.vars, weights_var_name),
+            getattr(self.vars, mask_var_name),
+            getattr(self.vars, threshold_var_name))
 
-          self.CreateVariable(weights_var_name, pc, theta_fn=MaskWeightFn)
-          py_utils.AddToPruningCollections(
-              getattr(self.vars, weights_var_name),
-              getattr(self.vars, mask_var_name),
-              getattr(self.vars, threshold_var_name))
+      else:
+        self.CreateVariable(weights_var_name, pc, self.AddGlobalVN)
 
-        else:
-          self.CreateVariable(weights_var_name, pc, self.AddGlobalVN)
-
-      pc = py_utils.WeightParams(
-          shape=[num_classes_per_shard],
-          init=py_utils.WeightInit.Constant(0.0),
-          dtype=p.dtype,
-          collections=[self.__class__.__name__ + '_vars'])
-      for i in range(p.num_shards):
-        self.CreateVariable('bias_%d' % i, pc, self.AddGlobalVN)
+    pc = py_utils.WeightParams(
+        shape=[num_classes_per_shard],
+        init=py_utils.WeightInit.Constant(0.0),
+        dtype=p.dtype,
+        collections=[self.__class__.__name__ + '_vars'])
+    for i in range(p.num_shards):
+      self.CreateVariable('bias_%d' % i, pc, self.AddGlobalVN)
 
   def _GetInputs(self, inputs):
     if isinstance(inputs, list):
@@ -4097,20 +4140,20 @@ class GradNormTracker(base_layer.BaseLayer):
 
   def __init__(self, params):
     super(GradNormTracker, self).__init__(params)
-    p = self.params
-    assert p.name
+    self._decay = params.decay
 
-    with tf.variable_scope(p.name):
-      pc = py_utils.WeightParams(
-          shape=[],
-          init=py_utils.WeightInit.Constant(0.0),
-          dtype=tf.float32,
-          collections=[self.__class__.__name__ + '_vars'])
-      self.CreateVariable('log_mean', pc, trainable=False)
-      self.CreateVariable('log_mean_squared', pc, trainable=False)
-      self.CreateVariable('total_weight', pc, trainable=False)
-      self.CreateVariable('total_rejections', pc, trainable=False)
-      self._decay = p.decay
+  def _CreateVariables(self):
+    super(GradNormTracker, self)._CreateVariables()
+
+    pc = py_utils.WeightParams(
+        shape=[],
+        init=py_utils.WeightInit.Constant(0.0),
+        dtype=tf.float32,
+        collections=[self.__class__.__name__ + '_vars'])
+    self.CreateVariable('log_mean', pc, trainable=False)
+    self.CreateVariable('log_mean_squared', pc, trainable=False)
+    self.CreateVariable('total_weight', pc, trainable=False)
+    self.CreateVariable('total_rejections', pc, trainable=False)
 
   def FProp(self, theta, grad_norm, has_nan=None):
     """Update gradient norm moving avgs, and returns whether or not ...
@@ -4707,12 +4750,18 @@ class MultitaskAdapterLayer(base_layer.BaseLayer):
         'Weight initialization for up and down projections. Only used for '
         'weights, not biases.  If None, uses default weight init, which is '
         'typically Xavier with scale of 1.0.')
+    p.Define(
+        'data_format', 'TBC', 'String(enum) specifying the input and output '
+        'data format for this layer. Supported formats: '
+        '"TBC": [time, batch, input_dim] and "BTC": [batch, time, input_dim].')
     return p
 
   def __init__(self, params):
     super(MultitaskAdapterLayer, self).__init__(params)
     p = self.params
     assert p.name
+    # Data format is either 'TBC' (time-major) or 'BTC' (batch-major).
+    assert p.data_format in ('TBC', 'BTC')
     with tf.variable_scope(p.name):
       base_emb_params = EmbeddingLayer.Params().Set(
           vocab_size=p.num_tasks, max_num_shards=1)
@@ -4746,35 +4795,40 @@ class MultitaskAdapterLayer(base_layer.BaseLayer):
     Args:
       theta: A NestedMap object containing weights' values of this layer and its
         children layers.
-      inputs: A tensor containing the activations from the previous layer of
-        shape [time, batch, input_dim].
+      inputs: A tensor containing the activations from the previous layer. For
+        'TBC', the shape is [time, batch, input_dim] and for 'BTC', it's
+        [batch, time, input_dim].
       tasks: An int32 tensor containing the task ID for each input.  If 'tasks'
-        is of rank 2, we assume it to be of shape [time, batch], indicating a
-        different task for each timestep.  In this case we look up adapter
-        params for each timestep.  If 'tasks' is of rank 1, we assume it to be
-        of shape [batch], indicating a single task for all timesteps of a
-        sequence.  This latter setup uses substantially less memory and is
-        generally preferred.
+        is of rank 2, we assume it to be of shape [time, batch] if 'BTC' and
+        [batch, time] if 'TBC', indicating a different task for each timestep.
+        In this case we look up adapter params for each timestep.  If 'tasks'
+        is of rank 1, we assume it to be of shape [batch], indicating a single
+        task for all timesteps of a sequence. This latter setup uses
+        substantially less memory and is generally preferred.
 
     Returns:
       A tensor containing the adapted activations with shape
-      [time, batch, input_dim].
+      [time, batch, input_dim] for 'TBC' and [batch, time, input_dim] for 'BTC'.
     """
     p = self.params
     inputs_shape = tf.shape(inputs)
+    per_timestep_task = (tasks.shape.ndims == 2)
+    batch_index = 1 if p.data_format == 'TBC' else 0
+    time_index = 1 - batch_index
     inputs = py_utils.with_dependencies(
         [
             # Checks that inputs has 3 dimensions, last is hidden dim.
             py_utils.assert_shape_match(inputs_shape, [-1, -1, p.input_dim]),
             # Checks that inputs and tasks have same batch dimension.
-            py_utils.assert_shape_match([inputs_shape[1]],
-                                        [tf.shape(tasks)[-1]])
+            py_utils.assert_shape_match([inputs_shape[batch_index]], [
+                tf.shape(tasks)[batch_index]
+                if per_timestep_task else tf.shape(tasks)[0]
+            ])
         ],
         inputs)
 
     # To support different task for each timetstep, flatten inputs and
     # tasks.  Below, 'batch' now refers to flattened batch size, time * batch.
-    per_timestep_task = (tasks.shape.ndims == 2)
     if per_timestep_task:
       tasks = py_utils.with_dependencies(
           [
@@ -4784,39 +4838,49 @@ class MultitaskAdapterLayer(base_layer.BaseLayer):
           ],
           tasks)
       tasks = tf.reshape(tasks, [-1])
-      inputs = tf.reshape(inputs, [1, -1, p.input_dim])
+      if p.data_format == 'TBC':
+        inputs = tf.reshape(inputs, [1, -1, p.input_dim])
+      else:
+        inputs = tf.reshape(inputs, [-1, 1, p.input_dim])
 
     # Lookup all weights and biases
     # [batch] -> [batch, hidden * k] -> [batch, hidden, k]
     down_weights = tf.reshape(
         self.down_proj_w.EmbLookup(theta.down_proj_w, tasks),
         [-1, p.input_dim, p.bottleneck_dim])
-    # [batch] -> [batch, k] -> [1, batch, k]
+    # [batch] -> [batch, k] -> [1, batch, k] if 'TBC' else [batch, 1, k]
     down_biases = tf.expand_dims(
-        self.down_proj_b.EmbLookup(theta.down_proj_b, tasks), 0)
+        self.down_proj_b.EmbLookup(theta.down_proj_b, tasks), time_index)
     # [batch] -> [batch, k * hidden] -> [batch, k, hidden]
     up_weights = tf.reshape(
         self.up_proj_w.EmbLookup(theta.up_proj_w, tasks),
         [-1, p.bottleneck_dim, p.input_dim])
-    # [batch] -> [batch, h] -> [1, batch, h]
+    # [batch] -> [batch, h] -> [1, batch, h] if 'TBC' else [batch, 1, h]
     up_biases = tf.expand_dims(
-        self.up_proj_b.EmbLookup(theta.up_proj_b, tasks), 0)
+        self.up_proj_b.EmbLookup(theta.up_proj_b, tasks), time_index)
 
     # Layer norm -> down-projection -> non-linearity -> up-projection
     norm_inputs = self.layer_norm.FProp(theta.layer_norm, inputs)
     # If per_timestep_task, t = 1, b = time * batch.
     # Otherwise, t = time, b = batch.
-    down_projected = tf.einsum('tbh,bhk->tbk', norm_inputs, down_weights)
+    if p.data_format == 'TBC':
+      down_projected = tf.einsum('tbh,bhk->tbk', norm_inputs, down_weights)
+    else:
+      down_projected = tf.einsum('bth,bhk->btk', norm_inputs, down_weights)
     down_projected += down_biases
     down_projected = tf.nn.relu(down_projected)
-    up_projected = tf.einsum('tbk,bkh->tbh', down_projected, up_weights)
+    if p.data_format == 'TBC':
+      up_projected = tf.einsum('tbk,bkh->tbh', down_projected, up_weights)
+    else:
+      up_projected = tf.einsum('btk,bkh->bth', down_projected, up_weights)
     up_projected += up_biases
     output = inputs + up_projected
 
-    # Unflatten output: [1, time * batch, hidden] -> [time, batch, hidden]
+    # Unflatten output:
+    #   for 'TBC': [1, time * batch, hidden] -> [time, batch, hidden]
+    #   for 'BTC': [1, batch * time, hidden] -> [batch, time, hidden]
     if per_timestep_task:
       output = tf.reshape(output, inputs_shape)
-
     return output
 
 
